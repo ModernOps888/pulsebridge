@@ -8,7 +8,8 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-black?style=for-the-badge&logo=typescript)](https://www.typescriptlang.org/)
 [![TailwindCSS](https://img.shields.io/badge/TailwindCSS-v4-black?style=for-the-badge&logo=tailwindcss)](https://tailwindcss.com/)
 [![Windows GDI](https://img.shields.io/badge/Win32-GDI%20Native-black?style=for-the-badge&logo=windows)](https://learn.microsoft.com/en-us/windows/win32/gdi/windows-gdi)
-[![SecOps Audited](https://img.shields.io/badge/SecOps-Zero%20Trust%20Hardened-10b981?style=for-the-badge&logo=security)](file:///C:/PulseBridge/ARCHITECTURE.md)
+[![SecOps Audited](https://img.shields.io/badge/SecOps-Zero%20Trust%20Hardened-10b981?style=for-the-badge&logo=security)](SECURITY.md)
+[![Security Policy](https://img.shields.io/badge/Security-Audit%20Remediated-10b981?style=for-the-badge&logo=shield)](SECURITY.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-eab308?style=for-the-badge)](LICENSE)
 
 ---
@@ -18,6 +19,25 @@
 **PulseBridge** empowers software engineers to step away from their workstations while retaining real-time visibility, telemetry tracking, and bidirectional interactive control of their AI agents and development environments straight from their smartphones.
 
 Whether you are walking outside on **4G cellular data**, grabbing coffee, or relaxing on the couch, PulseBridge streams your AI agent's internal reasoning, file changes, terminal execution, and desktop IDE interface directly to your mobile browser in a fluid, low-latency, mobile-first interface styled in **Obsidian, Radiant Gold, and Cyber Emerald Green**.
+
+---
+
+## 🛡️ Security Audit & Zero-Trust Hardening (Remediation Highlights)
+
+Following a comprehensive Security & Governance Audit, PulseBridge was fully hardened to enforce an uncompromising **Zero-Trust Architecture** across all local and remote endpoints:
+
+| Vulnerability Finding | CWE Reference | Pre-Audit Vulnerability & Risk | Hardened Remediation & Verification | Status |
+| :--- | :--- | :--- | :--- | :---: |
+| **Action Endpoint Auth** | [CWE-306](https://cwe.mitre.org/data/definitions/306.html) | Action routes executed payloads without verifying session tokens. | **100% Gated**: Every action route (`/api/action/*`, `/api/ingest/*`) strictly requires verified Bearer tokens. Unauthenticated calls yield `401 Unauthorized`. | :white_check_mark: Fixed |
+| **Command Injection / RCE** | [CWE-78](https://cwe.mitre.org/data/definitions/78.html) | Arbitrary PowerShell execution via `ExecuteCommand` payload. | **Opt-In Sandboxed**: Disabled by default. Requires `--enable-shell-commands`. Constrained to curated DevOps allowlist (`git`, `cargo`, `npm`, etc.); rejects shell chaining (`&`, `;`, `|`, `` ` ``). | :white_check_mark: Fixed |
+| **Rate-Limit Bypass** | [CWE-290](https://cwe.mitre.org/data/definitions/290.html) | Brute-force limiter keyed on spoofable `X-Forwarded-For` header. | **Kernel-Level Peer Tracking**: Keyed strictly on physical TCP socket peer (`ConnectInfo<SocketAddr>`). Spoofed headers ignored. 5 failed PINs trigger instant 300s IP lockout. | :white_check_mark: Fixed |
+| **Permissive Wildcard CORS** | [CWE-942](https://cwe.mitre.org/data/definitions/942.html) | Wildcard `Any` allowed any external browser tab to pivot to localhost. | **Restricted Origin Predicate**: Origin whitelist restricted strictly to loopback (`localhost`), local workstation LAN IP, and verified Cloudflare tunnels. | :white_check_mark: Fixed |
+| **Unauthenticated WebSocket** | [CWE-287](https://cwe.mitre.org/data/definitions/287.html) | Clients could tap `/ws` and passively consume agent thought stream. | **Token-Verified Handshake**: Silenced until client proves authentication. Unauthenticated connections forcefully terminated after 15s. | :white_check_mark: Fixed |
+| **Credential URL Exposure** | [CWE-598](https://cwe.mitre.org/data/definitions/598.html) | PIN and token exposed in mobile browser address bar and history. | **In-Memory URL Scrubbing**: Frontend immediately cleans query parameters using `window.history.replaceState` upon initial parse. | :white_check_mark: Fixed |
+| **Transport Guarantees** | [CWE-319](https://cwe.mitre.org/data/definitions/319.html) | Inaccurate "Encrypted HTTPS" claim for local HTTP daemon. | **Honest Framing**: Clarified as HTTP/WS locally on trusted LAN, TLS encrypted end-to-end via Cloudflare Quick Tunnel on WAN/4G. | :white_check_mark: Fixed |
+
+> [!NOTE]
+> For complete technical analyses, CVSS ratings, attack surface diagrams, and automated verification instructions, inspect [`SECURITY.md`](SECURITY.md) and [`tests/verify_all.py`](tests/verify_all.py).
 
 ---
 
@@ -285,11 +305,13 @@ pulsebridge/
 │   └── setup.ps1              # Full clean rebuild script
 │
 ├── tests/
-│   └── stress_test.py         # Automated SecOps & concurrency test suite
+│   ├── stress_test.py         # Concurrency and throughput benchmark suite
+│   └── verify_all.py          # Automated Zero-Trust SecOps verification suite (62/62)
 │
 ├── .env.example               # Template environment configuration
 ├── .gitignore                 # Comprehensive repository hygiene exclusions
 ├── ARCHITECTURE.md            # In-depth architectural design specification
+├── SECURITY.md                # Zero-Trust security governance & audit remediations
 └── README.md                  # Complete documentation and quickstart
 ```
 
