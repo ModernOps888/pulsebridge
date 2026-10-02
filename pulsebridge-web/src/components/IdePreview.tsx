@@ -65,17 +65,46 @@ export function IdePreview({
     return () => clearInterval(timer)
   }, [selectedWindowId, autoRefresh, refreshInterval, token])
 
-  const handleImageClick = async (e: React.MouseEvent<HTMLImageElement>) => {
+  const handleImageClick = async (e: React.PointerEvent<HTMLImageElement>) => {
     if (!touchMode || !imgRef.current) return
 
-    const rect = imgRef.current.getBoundingClientRect()
-    const clickX = e.clientX - rect.left
-    const clickY = e.clientY - rect.top
+    const img = imgRef.current
+    const rect = img.getBoundingClientRect()
 
-    const xRatio = Math.max(0, Math.min(1, clickX / rect.width))
-    const yRatio = Math.max(0, Math.min(1, clickY / rect.height))
+    const naturalWidth = img.naturalWidth || rect.width
+    const naturalHeight = img.naturalHeight || rect.height
+    if (naturalWidth === 0 || naturalHeight === 0) return
 
-    setClickIndicator({ x: clickX, y: clickY })
+    const imgAspect = naturalWidth / naturalHeight
+    const boxAspect = rect.width / rect.height
+
+    let renderWidth = rect.width
+    let renderHeight = rect.height
+    let offsetX = 0
+    let offsetY = 0
+
+    if (boxAspect > imgAspect) {
+      // Pillarboxed (empty padding on left/right)
+      renderWidth = rect.height * imgAspect
+      offsetX = (rect.width - renderWidth) / 2
+    } else {
+      // Letterboxed (empty padding on top/bottom)
+      renderHeight = rect.width / imgAspect
+      offsetY = (rect.height - renderHeight) / 2
+    }
+
+    const clickX = e.clientX - rect.left - offsetX
+    const clickY = e.clientY - rect.top - offsetY
+
+    // If tap was in empty letterbox margins, ignore
+    if (clickX < 0 || clickX > renderWidth || clickY < 0 || clickY > renderHeight) {
+      return
+    }
+
+    const xRatio = Math.max(0, Math.min(1, clickX / renderWidth))
+    const yRatio = Math.max(0, Math.min(1, clickY / renderHeight))
+
+    setClickIndicator({ x: e.clientX - rect.left, y: e.clientY - rect.top })
     setTimeout(() => setClickIndicator(null), 600)
 
     try {
@@ -242,24 +271,26 @@ export function IdePreview({
       <div className="relative rounded-2xl bg-black border border-emerald-950 overflow-hidden shadow-2xl min-h-[220px] flex items-center justify-center">
         {latestFrame || directImageUrl ? (
           <div className="relative w-full overflow-auto max-h-[70vh] flex items-center justify-center p-1">
-            <img
-              ref={imgRef}
-              src={latestFrame || directImageUrl || ''}
-              alt="Remote IDE Live Screen"
-              onClick={handleImageClick}
-              className={`max-w-full h-auto rounded-lg object-contain transition-transform duration-200 shadow-md ${
-                touchMode ? 'cursor-crosshair' : 'cursor-default'
-              }`}
-              style={{ transform: `scale(${zoomLevel})`, transformOrigin: 'top center' }}
-            />
-
-            {/* Click Indicator Ripple in Radiant Gold */}
-            {clickIndicator && (
-              <div
-                className="absolute w-8 h-8 rounded-full border-2 border-amber-400 bg-amber-400/40 -translate-x-1/2 -translate-y-1/2 animate-ping pointer-events-none"
-                style={{ left: `${clickIndicator.x}px`, top: `${clickIndicator.y}px` }}
+            <div className="relative inline-block">
+              <img
+                ref={imgRef}
+                src={latestFrame || directImageUrl || ''}
+                alt="Remote IDE Live Screen"
+                onPointerDown={handleImageClick}
+                className={`max-w-full h-auto rounded-lg object-contain transition-transform duration-200 shadow-md ${
+                  touchMode ? 'cursor-crosshair touch-none' : 'cursor-default'
+                }`}
+                style={{ transform: `scale(${zoomLevel})`, transformOrigin: 'top center' }}
               />
-            )}
+
+              {/* Click Indicator Ripple in Radiant Gold */}
+              {clickIndicator && (
+                <div
+                  className="absolute w-7 h-7 rounded-full border-2 border-amber-400 bg-amber-400/50 -translate-x-1/2 -translate-y-1/2 animate-ping pointer-events-none z-20"
+                  style={{ left: `${clickIndicator.x}px`, top: `${clickIndicator.y}px` }}
+                />
+              )}
+            </div>
           </div>
         ) : (
           <div className="text-center p-8 text-xs text-emerald-600/70 space-y-2 font-mono">

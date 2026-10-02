@@ -421,12 +421,19 @@ impl RemoteActionDispatcher {
 
                 let (screen_x, screen_y) = if let Some(hwnd) = cmd.window_id {
                     if hwnd > 0 {
+                        let target_hwnd = hwnd as HWND;
+                        // Bring target window to foreground so clicks are delivered directly to it
+                        ShowWindow(target_hwnd, SW_RESTORE);
+                        SetForegroundWindow(target_hwnd);
+                        BringWindowToTop(target_hwnd);
+                        std::thread::sleep(Duration::from_millis(40));
+
                         let mut rect: RECT = std::mem::zeroed();
-                        if GetWindowRect(hwnd as HWND, &mut rect) != 0 {
+                        if GetWindowRect(target_hwnd, &mut rect) != 0 {
                             let w = (rect.right - rect.left) as f32;
                             let h = (rect.bottom - rect.top) as f32;
-                            let x = rect.left + (w * cmd.x_ratio.clamp(0.0, 1.0)) as i32;
-                            let y = rect.top + (h * cmd.y_ratio.clamp(0.0, 1.0)) as i32;
+                            let x = rect.left + (w * cmd.x_ratio.clamp(0.0, 1.0)).round() as i32;
+                            let y = rect.top + (h * cmd.y_ratio.clamp(0.0, 1.0)).round() as i32;
                             (x, y)
                         } else {
                             return Err("Failed to get window rect".to_string());
@@ -434,31 +441,38 @@ impl RemoteActionDispatcher {
                     } else {
                         let w = windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CXSCREEN) as f32;
                         let h = windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CYSCREEN) as f32;
-                        let x = (w * cmd.x_ratio.clamp(0.0, 1.0)) as i32;
-                        let y = (h * cmd.y_ratio.clamp(0.0, 1.0)) as i32;
+                        let x = (w * cmd.x_ratio.clamp(0.0, 1.0)).round() as i32;
+                        let y = (h * cmd.y_ratio.clamp(0.0, 1.0)).round() as i32;
                         (x, y)
                     }
                 } else {
                     let w = windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CXSCREEN) as f32;
                     let h = windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CYSCREEN) as f32;
-                    let x = (w * cmd.x_ratio.clamp(0.0, 1.0)) as i32;
-                    let y = (h * cmd.y_ratio.clamp(0.0, 1.0)) as i32;
+                    let x = (w * cmd.x_ratio.clamp(0.0, 1.0)).round() as i32;
+                    let y = (h * cmd.y_ratio.clamp(0.0, 1.0)).round() as i32;
                     (x, y)
                 };
 
+                // Move cursor to calibrated coordinates
                 SetCursorPos(screen_x, screen_y);
+                // Crucial delay: allows Windows DWM hit-testing engine to register cursor at position before firing click
+                std::thread::sleep(Duration::from_millis(30));
+
                 let is_right = cmd.is_right.unwrap_or(false);
                 let is_double = cmd.is_double.unwrap_or(false);
 
                 if is_right {
                     mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+                    std::thread::sleep(Duration::from_millis(20));
                     mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
                 } else {
                     mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                    std::thread::sleep(Duration::from_millis(20));
                     mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                     if is_double {
-                        std::thread::sleep(Duration::from_millis(50));
+                        std::thread::sleep(Duration::from_millis(60));
                         mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                        std::thread::sleep(Duration::from_millis(20));
                         mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                     }
                 }
