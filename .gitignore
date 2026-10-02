@@ -7,6 +7,7 @@
 target/
 **/*.rs.bk
 *.pdb
+*.exe
 Cargo.lock
 
 # Node.js & Frontend build outputs

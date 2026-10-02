@@ -14,11 +14,12 @@ pub struct AuthManager {
     failed_attempts: Arc<RwLock<HashMap<String, (u32, Instant)>>>,
     lan_ip: String,
     port: u16,
+    tunnel_url: Arc<RwLock<Option<String>>>,
 }
 
 #[allow(dead_code)]
 impl AuthManager {
-    pub fn new(port: u16, custom_pin: Option<String>) -> Self {
+    pub fn new(port: u16, custom_pin: Option<String>, tunnel_url: Option<String>) -> Self {
         let pin = match custom_pin {
             Some(p) if p.len() >= 4 => p,
             _ => {
@@ -42,6 +43,7 @@ impl AuthManager {
             failed_attempts: Arc::new(RwLock::new(HashMap::new())),
             lan_ip,
             port,
+            tunnel_url: Arc::new(RwLock::new(tunnel_url)),
         }
     }
 
@@ -57,30 +59,66 @@ impl AuthManager {
         self.port
     }
 
-    pub fn get_pairing_url(&self) -> String {
+    pub fn set_tunnel_url(&self, url: String) {
+        *self.tunnel_url.write() = Some(url);
+    }
+
+    pub fn get_tunnel_url(&self) -> Option<String> {
+        self.tunnel_url.read().clone()
+    }
+
+    pub fn get_wifi_pairing_url(&self) -> String {
         format!("http://{}:{}/?pin={}&token={}", self.lan_ip, self.port, self.pin, self.secret_token)
     }
 
+    pub fn get_tunnel_pairing_url(&self) -> Option<String> {
+        self.tunnel_url.read().as_ref().map(|url| {
+            let base = url.trim_end_matches('/');
+            format!("{}/?pin={}&token={}", base, self.pin, self.secret_token)
+        })
+    }
+
+    pub fn get_pairing_url(&self) -> String {
+        if let Some(tunnel_url) = self.get_tunnel_pairing_url() {
+            tunnel_url
+        } else {
+            self.get_wifi_pairing_url()
+        }
+    }
+
     pub fn print_startup_banner(&self) {
-        let pairing_url = self.get_pairing_url();
+        let wifi_url = self.get_wifi_pairing_url();
         println!("============================================================");
         println!("           PULSEBRIDGE - UNIVERSAL AI IDE COMPANION          ");
         println!("============================================================");
-        println!("  Web Dashboard: http://{}:{}", self.lan_ip, self.port);
-        println!("  Localhost:     http://localhost:{}", self.port);
         println!("  Access PIN:    {}", self.pin);
-        println!("  Pairing URL:   {}", pairing_url);
-        println!("------------------------------------------------------------");
-        println!("  SCAN TO CONNECT FROM PHONE:");
-        
-        if let Ok(code) = QrCode::new(pairing_url.as_bytes()) {
+        println!("  Localhost:     http://localhost:{}", self.port);
+        println!("  Wi-Fi LAN IP:  http://{}:{}", self.lan_ip, self.port);
+        if let Some(ref tunnel) = *self.tunnel_url.read() {
+            println!("  4G Tunnel URL: {}", tunnel);
+        }
+        println!("============================================================");
+        println!("  [1] 📶 WI-FI PAIRING (Same Local Network / Wi-Fi):");
+        println!("      URL: {}", wifi_url);
+        if let Ok(code) = QrCode::new(wifi_url.as_bytes()) {
             let qr_string = code.render::<unicode::Dense1x2>()
                 .dark_color(unicode::Dense1x2::Light)
                 .light_color(unicode::Dense1x2::Dark)
                 .build();
             println!("{}", qr_string);
-        } else {
-            println!("  [QR Code generation unavailable]");
+        }
+
+        if let Some(tunnel_pairing) = self.get_tunnel_pairing_url() {
+            println!("------------------------------------------------------------");
+            println!("  [2] 🌐 4G / WAN CELLULAR PAIRING (Outside Wi-Fi / Worldwide):");
+            println!("      URL: {}", tunnel_pairing);
+            if let Ok(code) = QrCode::new(tunnel_pairing.as_bytes()) {
+                let qr_string = code.render::<unicode::Dense1x2>()
+                    .dark_color(unicode::Dense1x2::Light)
+                    .light_color(unicode::Dense1x2::Dark)
+                    .build();
+                println!("{}", qr_string);
+            }
         }
         println!("============================================================\n");
     }
@@ -136,8 +174,12 @@ impl AuthManager {
         self.authorized_tokens.read().contains(token)
     }
 
-    pub fn get_qr_svg(&self) -> Result<String, String> {
-        let pairing_url = self.get_pairing_url();
+    pub fn get_qr_svg(&self, mode: Option<&str>) -> Result<String, String> {
+        let pairing_url = match mode {
+            Some("wifi") | Some("lan") => self.get_wifi_pairing_url(),
+            Some("wan") | Some("4g") | Some("cellular") => self.get_tunnel_pairing_url().unwrap_or_else(|| self.get_wifi_pairing_url()),
+            _ => self.get_pairing_url(),
+        };
         let code = QrCode::new(pairing_url.as_bytes()).map_err(|e| e.to_string())?;
         let svg = code.render::<qrcode::render::svg::Color>()
             .min_dimensions(200, 200)

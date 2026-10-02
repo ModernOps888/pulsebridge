@@ -57,8 +57,16 @@ pub async fn login_handler(
     }
 }
 
-pub async fn qr_code_handler(State(state): State<SharedState>) -> impl IntoResponse {
-    match state.auth().get_qr_svg() {
+#[derive(Debug, Deserialize)]
+pub struct QrCodeQuery {
+    pub mode: Option<String>,
+}
+
+pub async fn qr_code_handler(
+    State(state): State<SharedState>,
+    Query(query): Query<QrCodeQuery>,
+) -> impl IntoResponse {
+    match state.auth().get_qr_svg(query.mode.as_deref()) {
         Ok(svg) => (
             StatusCode::OK,
             [(header::CONTENT_TYPE, "image/svg+xml")],

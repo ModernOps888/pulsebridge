@@ -39,8 +39,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let port = parse_arg(&args, "--port").and_then(|p| p.parse().ok()).unwrap_or(8080);
     let custom_pin = parse_arg(&args, "--pin");
+    let tunnel_url = parse_arg(&args, "--tunnel-url")
+        .or_else(|| parse_arg(&args, "--public-url"))
+        .or_else(|| std::env::var("PULSEBRIDGE_TUNNEL_URL").ok())
+        .or_else(|| std::env::var("PULSEBRIDGE_PUBLIC_URL").ok());
 
-    let auth_manager = AuthManager::new(port, custom_pin);
+    let auth_manager = AuthManager::new(port, custom_pin, tunnel_url);
     auth_manager.print_startup_banner();
 
     let state = SharedState::new(auth_manager.clone(), port);
