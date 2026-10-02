@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import type { ChatStep, IdeWindowInfo, ServerAlert, SystemTelemetry, TaskProgress } from '../types'
+import { pulseAudio } from '../utils/audio'
 
 export function usePulseBridge() {
   const [token, setToken] = useState<string | null>(() => {
@@ -16,6 +17,8 @@ export function usePulseBridge() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false)
   const [isConnected, setIsConnected] = useState<boolean>(false)
   const [authError, setAuthError] = useState<string | null>(null)
+  const [latencyMs, setLatencyMs] = useState<number | null>(null)
+  const [isSoundEnabled, setIsSoundEnabled] = useState<boolean>(() => pulseAudio.isSoundEnabled())
 
   const [task, setTask] = useState<TaskProgress | null>(null)
   const [chatSteps, setChatSteps] = useState<ChatStep[]>([])
@@ -26,6 +29,12 @@ export function usePulseBridge() {
 
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectTimeoutRef = useRef<number | null>(null)
+
+  const toggleSound = () => {
+    const next = pulseAudio.toggleSound()
+    setIsSoundEnabled(next)
+    return next
+  }
 
   // Vibrate mobile device helper
   const triggerHaptic = (pattern: number | number[] = 40) => {
@@ -87,6 +96,9 @@ export function usePulseBridge() {
               return [...prev, msg.payload]
             })
             triggerHaptic(30)
+            if (msg.payload?.source !== 'USER') {
+              pulseAudio.playChime('milestone')
+            }
             break
 
           case 'progress_update':
@@ -104,6 +116,7 @@ export function usePulseBridge() {
           case 'alert':
             setAlerts((prev) => [msg.payload, ...prev.slice(0, 9)])
             triggerHaptic([50, 80, 50])
+            pulseAudio.playChime('action_required')
             break
         }
       } catch (err) {
@@ -179,6 +192,7 @@ export function usePulseBridge() {
       ide: task?.active_ide || 'antigravity',
     }
     setChatSteps((prev) => [...prev, userStep])
+    pulseAudio.playChime('prompt_sent')
 
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       // Fallback to REST
@@ -203,6 +217,45 @@ export function usePulseBridge() {
     triggerHaptic(40)
   }
 
+  // Remote mouse scroll helper
+  const sendScroll = async (delta: number, xRatio?: number, yRatio?: number, windowId?: number) => {
+    try {
+      await fetch('/api/action/scroll', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          delta,
+          x_ratio: xRatio,
+          y_ratio: yRatio,
+          window_id: windowId,
+        }),
+      })
+      triggerHaptic(20)
+    } catch (err) {
+      console.error('Failed to trigger remote scroll', err)
+    }
+  }
+
+  // Remote hotkey helper
+  const sendHotkey = async (key: string) => {
+    try {
+      await fetch('/api/action/hotkey', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ key }),
+      })
+      triggerHaptic(25)
+    } catch (err) {
+      console.error('Failed to send remote hotkey', err)
+    }
+  }
+
   // Request screen/window snapshot
   const requestSnapshot = (windowId?: number, quality = 65) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -225,6 +278,33 @@ export function usePulseBridge() {
   const dismissAlert = (id: string) => {
     setAlerts((prev) => prev.filter((a) => a.id !== id))
   }
+
+  // Live round-trip latency measurement (RTT)
+  useEffect(() => {
+    if (!isAuthenticated || !isConnected) {
+      setLatencyMs(null)
+      return
+    }
+
+    let active = true
+    const measureLatency = async () => {
+      try {
+        const start = performance.now()
+        const res = await fetch('/api/telemetry', { cache: 'no-store' })
+        if (res.ok && active) {
+          const rtt = Math.round(performance.now() - start)
+          setLatencyMs(rtt)
+        }
+      } catch (_) {}
+    }
+
+    measureLatency()
+    const timer = setInterval(measureLatency, 4000)
+    return () => {
+      active = false
+      clearInterval(timer)
+    }
+  }, [isAuthenticated, isConnected])
 
   // Auto-connect if token is present
   useEffect(() => {
@@ -261,9 +341,14 @@ export function usePulseBridge() {
     windows,
     latestFrame,
     alerts,
+    latencyMs,
+    isSoundEnabled,
+    toggleSound,
     loginWithPin,
     logout,
     sendPrompt,
+    sendScroll,
+    sendHotkey,
     requestSnapshot,
     emergencyStop,
     dismissAlert,

@@ -22,9 +22,14 @@ export function App() {
     windows,
     latestFrame,
     alerts,
+    latencyMs,
+    isSoundEnabled,
+    toggleSound,
     loginWithPin,
     logout,
     sendPrompt,
+    sendScroll,
+    sendHotkey,
     requestSnapshot,
     emergencyStop,
     dismissAlert,
@@ -44,12 +49,15 @@ export function App() {
   }
 
   return (
-    <div className="min-h-screen bg-[#070a13] text-gray-100 flex flex-col font-sans">
+    <div className="min-h-screen bg-[#060907] text-gray-100 flex flex-col font-sans">
       {/* Top Header */}
       <Header
         isConnected={isConnected}
         activeIde={task?.active_ide}
         telemetry={telemetry}
+        latencyMs={latencyMs}
+        isSoundEnabled={isSoundEnabled}
+        onToggleSound={toggleSound}
         onLock={logout}
         onEmergencyStop={emergencyStop}
       />
@@ -105,6 +113,8 @@ export function App() {
             token={token}
             onRequestSnapshot={requestSnapshot}
             latestFrame={latestFrame}
+            onScroll={sendScroll}
+            onHotkey={sendHotkey}
           />
         )}
         {activeTab === 'system' && <SystemTelemetry telemetry={telemetry} token={token} />}

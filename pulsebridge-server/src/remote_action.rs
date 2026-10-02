@@ -101,7 +101,15 @@ pub struct MouseClickCommand {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct HotkeyCommand {
-    pub key: String, // "ctrl_l", "ctrl_k", "ctrl_s", "ctrl_c", "ctrl_tilde", "esc", "enter", "f5"
+    pub key: String, // "ctrl_l", "ctrl_k", "ctrl_s", "ctrl_c", "ctrl_tilde", "esc", "enter", "f5", "tab", "backspace", "delete", "up", "down", "left", "right", "pageup", "pagedown", "ctrl_z", "ctrl_y"
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MouseScrollCommand {
+    pub window_id: Option<isize>,
+    pub delta: i32, // Positive = scroll up, Negative = scroll down (typically 120 or -120)
+    pub x_ratio: Option<f32>,
+    pub y_ratio: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -491,6 +499,77 @@ impl RemoteActionDispatcher {
         handle.join().map_err(|_| "Click thread panicked".to_string())?
     }
 
+    pub fn simulate_scroll(cmd: MouseScrollCommand) -> Result<(), String> {
+        let handle = std::thread::spawn(move || {
+            unsafe {
+                let winsta = OpenWindowStationA(b"WinSta0\0".as_ptr(), 0, 0x037F);
+                if winsta != 0 {
+                    SetProcessWindowStation(winsta);
+                }
+                let desk = OpenDesktopA(b"default\0".as_ptr(), 0, 0, 0x01FF);
+                if desk != 0 {
+                    SetThreadDesktop(desk);
+                }
+                let _ = SetProcessDPIAware();
+
+                if let Some(hwnd) = cmd.window_id {
+                    if hwnd > 0 {
+                        let target_hwnd = hwnd as HWND;
+                        ShowWindow(target_hwnd, SW_RESTORE);
+                        SetForegroundWindow(target_hwnd);
+                        BringWindowToTop(target_hwnd);
+                        std::thread::sleep(Duration::from_millis(30));
+                    }
+                }
+
+                // If coordinates were specified, reposition cursor first
+                if let (Some(xr), Some(yr)) = (cmd.x_ratio, cmd.y_ratio) {
+                    let (screen_x, screen_y) = if let Some(hwnd) = cmd.window_id {
+                        if hwnd > 0 {
+                            let mut rect: RECT = std::mem::zeroed();
+                            if GetWindowRect(hwnd as HWND, &mut rect) != 0 {
+                                let w = (rect.right - rect.left) as f32;
+                                let h = (rect.bottom - rect.top) as f32;
+                                let x = rect.left + (w * xr.clamp(0.0, 1.0)).round() as i32;
+                                let y = rect.top + (h * yr.clamp(0.0, 1.0)).round() as i32;
+                                (x, y)
+                            } else {
+                                (0, 0)
+                            }
+                        } else {
+                            let w = windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CXSCREEN) as f32;
+                            let h = windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CYSCREEN) as f32;
+                            ((w * xr.clamp(0.0, 1.0)).round() as i32, (h * yr.clamp(0.0, 1.0)).round() as i32)
+                        }
+                    } else {
+                        let w = windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CXSCREEN) as f32;
+                        let h = windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CYSCREEN) as f32;
+                        ((w * xr.clamp(0.0, 1.0)).round() as i32, (h * yr.clamp(0.0, 1.0)).round() as i32)
+                    };
+
+                    if screen_x > 0 || screen_y > 0 {
+                        SetCursorPos(screen_x, screen_y);
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                }
+
+                const MOUSEEVENTF_WHEEL: u32 = 0x0800;
+                mouse_event(MOUSEEVENTF_WHEEL, 0, 0, cmd.delta, 0);
+
+                if desk != 0 {
+                    CloseDesktop(desk);
+                }
+                if winsta != 0 {
+                    CloseWindowStation(winsta);
+                }
+
+                Ok(())
+            }
+        });
+
+        handle.join().map_err(|_| "Scroll thread panicked".to_string())?
+    }
+
     pub fn simulate_hotkey(hotkey: &str) -> Result<(), String> {
         let key_str = hotkey.to_string();
         let handle = std::thread::spawn(move || {
@@ -522,6 +601,18 @@ impl RemoteActionDispatcher {
                         Self::simulate_combo(&[VK_CONTROL, 0x43]);
                         Ok(())
                     }
+                    "ctrl_z" => {
+                        Self::simulate_combo(&[VK_CONTROL, 0x5A]);
+                        Ok(())
+                    }
+                    "ctrl_y" => {
+                        Self::simulate_combo(&[VK_CONTROL, 0x59]);
+                        Ok(())
+                    }
+                    "ctrl_a" => {
+                        Self::simulate_combo(&[VK_CONTROL, 0x41]);
+                        Ok(())
+                    }
                     "ctrl_tilde" | "ctrl_`" => {
                         Self::simulate_combo(&[VK_CONTROL, 0xC0]);
                         Ok(())
@@ -536,6 +627,42 @@ impl RemoteActionDispatcher {
                     }
                     "f5" => {
                         Self::simulate_key_press(VK_F5);
+                        Ok(())
+                    }
+                    "tab" => {
+                        Self::simulate_key_press(0x09);
+                        Ok(())
+                    }
+                    "backspace" => {
+                        Self::simulate_key_press(0x08);
+                        Ok(())
+                    }
+                    "delete" => {
+                        Self::simulate_key_press(0x2E);
+                        Ok(())
+                    }
+                    "up" => {
+                        Self::simulate_key_press(0x26);
+                        Ok(())
+                    }
+                    "down" => {
+                        Self::simulate_key_press(0x28);
+                        Ok(())
+                    }
+                    "left" => {
+                        Self::simulate_key_press(0x25);
+                        Ok(())
+                    }
+                    "right" => {
+                        Self::simulate_key_press(0x27);
+                        Ok(())
+                    }
+                    "pageup" | "page_up" => {
+                        Self::simulate_key_press(0x21);
+                        Ok(())
+                    }
+                    "pagedown" | "page_down" => {
+                        Self::simulate_key_press(0x22);
                         Ok(())
                     }
                     _ => Err(format!("Unsupported hotkey: {key_str}")),

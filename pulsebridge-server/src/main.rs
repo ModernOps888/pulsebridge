@@ -68,6 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/action/prompt", post(ingest::handle_send_prompt))
         .route("/api/action/remote_prompt", post(ingest::handle_remote_action))
         .route("/api/action/click", post(ingest::handle_mouse_click))
+        .route("/api/action/scroll", post(ingest::handle_mouse_scroll))
         .route("/api/action/hotkey", post(ingest::handle_hotkey))
         .route("/ws", get(ws::ws_handler));
 

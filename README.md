@@ -63,26 +63,45 @@ PulseBridge is built as a zero-dependency, ultra-lightweight native bridge compr
 
 ## ⚡ Core Capabilities
 
-### 1. 🖥️ TeamViewer Mode for AI IDEs
+### 1. 🖥️ TeamViewer Mode for AI IDEs & High-DPI Zoom
 - **Sub-Millisecond Native Screen Streaming**: Leverages Windows GDI with DWM desktop attachment (`OpenWindowStationA("WinSta0")` + `SetThreadDesktop` + `SetProcessDPIAware()`) and hardware `StretchBlt` scaling. Delivers fluid desktop captures with an in-memory 150ms dynamic cache running at **75+ req/sec** under sustained load.
-- **Precision Touch-to-Click**: Tap anywhere on the mobile IDE preview to project a DPI-calibrated mouse click directly into your IDE window, chat prompt, or terminal.
-- **Virtual IDE Hotkeys**: Rapid one-tap execution of vital workflow shortcuts:
+- **High-Visibility Gilded Scrollbars & 150%+ Zooming**: Engineered for high-resolution mobile viewports with **12px wide high-contrast radiant gold and cyber emerald scrollbars**, ensuring smooth scrolling even when zoomed in to 150% or 200%.
+- **Dual Interaction Modes**:
+  - `👆 Tap Mode (Remote Click)`: Direct DPI-calibrated mouse clicks projected into your active IDE window or terminal.
+  - `✋ Pan Mode (Canvas Drag)`: Touch-drag panning across the zoomed desktop without accidentally triggering remote clicks.
+- **On-Screen Pan D-Pad Controller**: Floating directional pad (`▲`, `▼`, `◄`, `►`, `⌖ Center`) for effortless 1-tap navigation across zoomed high-resolution displays.
+- **Remote Mouse Wheel Scrolling**: Dedicated remote scroll controls (`▲ Scroll Up`, `▼ Scroll Down`, `Page Up`, `Page Down`) with adjustable speed multipliers (1x 120px vs 3x 360px), backed by native Win32 `MOUSEEVENTF_WHEEL` simulation.
+- **Expanded Dev Keyboard Bar**: Rapid 1-tap execution of vital workflow shortcuts:
+  - `Ctrl + Z`: Undo code edits
+  - `Ctrl + Y`: Redo code edits
+  - `Ctrl + S`: Save active document
+  - `Ctrl + A`: Select All
+  - `Tab`: Indent / Autocomplete
+  - `Arrow Keys (▲ ▼ ◄ ►)`: Precision cursor navigation
   - `Ctrl + L`: Toggle AI Chat / Composer panel
   - `Ctrl + K`: Trigger inline AI code generation
   - `Ctrl + \``: Toggle integrated terminal
-  - `Ctrl + S`: Save active document
   - `Ctrl + C`: Emergency abort / terminate running task
-  - `Esc`: Dismiss modal, suggestions, or dialog
+  - `Esc`: Dismiss modal or suggestions
   - `Enter`: Submit prompt / execute terminal command
   - `F5`: Launch debugger
 
-### 2. 💬 Bidirectional Mobile Prompt Dispatch
+### 2. 🔔 Harmonic Audio Chimes & Haptic Telemetry
+- **Zero-Asset Web Audio API Engine**: Real-time harmonic chimes synthesized mathematically on device without downloading external MP3s.
+- **Solfeggio 528Hz & 792Hz Frequencies**: Ascending 3-tone harmonic triad for milestone completions, distinct octave pings for action-required alerts, and ascending chirps on prompt dispatch.
+- **Mute / Unmute Control**: Global one-tap audio toggle in the persistent header with state persistence.
+- **Live Latency & RTT HUD**: Measures true roundtrip latency in milliseconds (`⚡ 24ms`) on every heartbeat.
+- **Haptic Tactile Vibrations**: Tuned millisecond vibration sequences for Android and iOS devices.
+
+### 3. 💬 Interactive Action Cards & Human-in-the-Loop Approvals
+- **Decision Chips in Chat Stream**: When an agent asks a question or proposes actions, PulseBridge renders high-contrast, one-tap clickable buttons in Radiant Gold.
+- **`ask_phone` MCP Tool**: Allows AI agents to directly request user confirmation (`["Deploy to Prod", "Run Tests First", "Cancel"]`) with instant alert chimes.
 - **Seamless Prompting on 4G**: Send prompt revisions, bug fixes, or new directives from your phone while away from your desk.
 - **Native Precision Caret Injection**: The host attaches to the interactive desktop thread (`AttachThreadInput`), auto-focuses the AI IDE prompt textarea, securely injects text via `CF_UNICODETEXT` clipboard buffer, and triggers submission with hardware scan codes (`MapVirtualKeyW(VK_RETURN)`).
 - **Hands-Free Speech-to-Text**: Integrated Web Speech API dictation allows hands-free voice prompting directly from your smartphone microphone.
 - **Dual-Mode Queueing**: Choose between immediate window injection or background agent inbox queueing (`.inbox/prompt_queue.json`).
 
-### 3. 🧠 Live Agent Stream & Task Tracking
+### 4. 🧠 Live Agent Stream & Task Tracking
 - **Antigravity Brain Sync**: Monitors `transcript.jsonl` in real time to display live thought processes, tool invocations, and execution status.
 - **Living Checklists**: Dynamically parses task files (`task.md`, `implementation_plan.md`) to show real-time progress bars and milestone completion percentages.
 - **Cursor & VS Code Support**: Automatically tails Cursor Composer workspaces and VS Code Copilot/Cline output channels.
@@ -204,6 +223,7 @@ Add this entry to your `mcp.json` or `claude_desktop_config.json`:
 ```
 
 ### MCP Tools Provided:
+- `ask_phone(question, options, level)`: Prompts the mobile device with interactive 1-tap decision chips (e.g. `["Deploy to Prod", "Run Tests First", "Cancel"]`) and triggers priority alert chimes.
 - `notify_phone(title, message, priority)`: Sends an instant mobile alert with haptic vibration.
 - `update_task_status(task_name, status, percent)`: Updates mobile progress bar and checklist items.
 - `check_phone_inbox()`: Reads incoming instructions queued from your mobile phone.

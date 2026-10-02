@@ -15,6 +15,31 @@ interface ChatStreamProps {
   onSendPrompt: (msg: string) => void
 }
 
+function extractOptions(step: ChatStep): string[] {
+  if (step.tool_calls) {
+    for (const call of step.tool_calls) {
+      if (call.tool_name === 'ask_phone' || call.tool_name === 'ask_question') {
+        try {
+          if (call.action) {
+            const parsed = JSON.parse(call.action)
+            if (Array.isArray(parsed.options) && parsed.options.length > 0) {
+              return parsed.options
+            }
+          }
+        } catch (_) {}
+      }
+    }
+  }
+
+  if (step.content) {
+    const match = step.content.match(/\[OPTIONS:\s*([^\]]+)\]/i)
+    if (match && match[1]) {
+      return match[1].split('|').map((s) => s.trim()).filter(Boolean)
+    }
+  }
+  return []
+}
+
 export function ChatStream({ steps, onSendPrompt }: ChatStreamProps) {
   const [inputMessage, setInputMessage] = useState('')
   const [expandedThinking, setExpandedThinking] = useState<Record<string, boolean>>({})
@@ -60,6 +85,10 @@ export function ChatStream({ steps, onSendPrompt }: ChatStreamProps) {
           steps.map((step) => {
             const isUser = step.source === 'USER'
             const isThinkingExpanded = expandedThinking[step.id] || false
+            const options = extractOptions(step)
+            const displayContent = step.content
+              ? step.content.replace(/\[OPTIONS:\s*[^\]]+\]/gi, '').trim()
+              : ''
 
             return (
               <div
@@ -132,9 +161,25 @@ export function ChatStream({ steps, onSendPrompt }: ChatStreamProps) {
                   )}
 
                   {/* Text Content */}
-                  {step.content && (
+                  {displayContent && (
                     <div className="whitespace-pre-wrap font-sans text-xs">
-                      {step.content}
+                      {displayContent}
+                    </div>
+                  )}
+
+                  {/* Interactive Option Buttons (ask_phone / ask_question) */}
+                  {options.length > 0 && (
+                    <div className="pt-2 flex flex-wrap gap-1.5 border-t border-amber-500/20 mt-1">
+                      {options.map((opt, i) => (
+                        <button
+                          key={i}
+                          onClick={() => onSendPrompt(opt)}
+                          className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-amber-950/80 hover:bg-amber-900 border border-amber-500/80 text-amber-200 active:bg-amber-500 active:text-black transition-all shadow-sm flex items-center gap-1.5"
+                        >
+                          <Sparkles className="w-3 h-3 text-amber-400" />
+                          <span>{opt}</span>
+                        </button>
+                      ))}
                     </div>
                   )}
 

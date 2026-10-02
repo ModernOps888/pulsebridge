@@ -60,6 +60,27 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'ask_phone',
+        description: 'Sends an interactive question with clickable decision buttons (e.g. ["Proceed", "Abort", "Review"]) to the user mobile dashboard',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            question: { type: 'string', description: 'The question or choice to present to the user' },
+            options: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Array of quick-tap button choices, e.g. ["Deploy to Production", "Run Tests First", "Cancel"]',
+            },
+            level: {
+              type: 'string',
+              enum: ['info', 'warning', 'critical'],
+              description: 'Notification urgency level',
+            },
+          },
+          required: ['question'],
+        },
+      },
+      {
         name: 'check_phone_inbox',
         description: 'Checks if the user has sent any instructions, answers, or corrections from their phone',
         inputSchema: {
@@ -125,6 +146,62 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     } catch (err) {
       return {
         content: [{ type: 'text', text: `Error updating task progress: ${err.message}` }],
+        isError: true,
+      }
+    }
+  }
+
+  if (name === 'ask_phone') {
+    try {
+      const options =
+        Array.isArray(args.options) && args.options.length > 0 ? args.options : ['Approve', 'Reject']
+      const optionsTag = `\n[OPTIONS: ${options.join(' | ')}]`
+      const fullMessage = `${args.question}${optionsTag}`
+
+      // Post chat event step
+      await fetch(`${BRIDGE_URL}/api/ingest/event`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          event_type: 'step',
+          step_type: 'ASK_QUESTION',
+          content: fullMessage,
+          status: 'RUNNING',
+          tool_calls: [
+            {
+              tool_name: 'ask_phone',
+              action: JSON.stringify({ question: args.question, options }),
+              summary: 'Waiting for phone decision',
+            },
+          ],
+        }),
+      })
+
+      // Also trigger a high-priority alert chime on the phone
+      await fetch(`${BRIDGE_URL}/api/ingest/event`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          event_type: 'alert',
+          content: args.question,
+          task_title: 'Decision Required from Phone',
+          status: args.level === 'critical' ? 'error' : 'warning',
+        }),
+      })
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Decision prompt dispatched to phone with options: [${options.join(
+              ', '
+            )}]. Check phone inbox for user response using check_phone_inbox.`,
+          },
+        ],
+      }
+    } catch (err) {
+      return {
+        content: [{ type: 'text', text: `Failed to prompt phone: ${err.message}` }],
         isError: true,
       }
     }

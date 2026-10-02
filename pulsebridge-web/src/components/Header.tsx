@@ -1,10 +1,13 @@
-import { Lock, Battery, BatteryCharging, AlertOctagon, Sparkles } from 'lucide-react'
+import { Lock, Battery, BatteryCharging, AlertOctagon, Sparkles, Volume2, VolumeX, Zap } from 'lucide-react'
 import type { IdeSource, SystemTelemetry } from '../types'
 
 interface HeaderProps {
   isConnected: boolean
   activeIde?: IdeSource
   telemetry: SystemTelemetry | null
+  latencyMs?: number | null
+  isSoundEnabled?: boolean
+  onToggleSound?: () => void
   onLock: () => void
   onEmergencyStop: () => void
 }
@@ -13,6 +16,9 @@ export function Header({
   isConnected,
   activeIde = 'antigravity',
   telemetry,
+  latencyMs,
+  isSoundEnabled = true,
+  onToggleSound,
   onLock,
   onEmergencyStop,
 }: HeaderProps) {
@@ -62,7 +68,31 @@ export function Header({
         </div>
 
         {/* Right: Quick actions & telemetry */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5 sm:gap-2">
+          {latencyMs !== null && latencyMs !== undefined && (
+            <div
+              className="flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded-md border bg-[#0d140f] border-emerald-900/80 text-amber-300"
+              title={`Network RTT Latency: ${latencyMs}ms`}
+            >
+              <Zap className="w-3 h-3 text-amber-400" />
+              <span>{latencyMs}ms</span>
+            </div>
+          )}
+
+          {onToggleSound && (
+            <button
+              onClick={onToggleSound}
+              title={isSoundEnabled ? 'Audio Chimes Enabled' : 'Audio Muted'}
+              className={`p-1.5 rounded-lg border transition-all ${
+                isSoundEnabled
+                  ? 'bg-amber-950/60 border-amber-600/70 text-amber-300'
+                  : 'bg-[#0d140f] border-emerald-950 text-gray-500'
+              }`}
+            >
+              {isSoundEnabled ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
+            </button>
+          )}
+
           {telemetry?.battery_percent !== undefined && (
             <div className="flex items-center gap-1 text-[11px] text-amber-300 bg-[#0d140f] px-2 py-0.5 rounded-md border border-emerald-900/80">
               {telemetry.is_charging ? (

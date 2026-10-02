@@ -139,4 +139,13 @@ pub async fn handle_hotkey(
     }
 }
 
+pub async fn handle_mouse_scroll(
+    Json(payload): Json<crate::remote_action::MouseScrollCommand>,
+) -> impl IntoResponse {
+    match crate::remote_action::RemoteActionDispatcher::simulate_scroll(payload) {
+        Ok(_) => (StatusCode::OK, Json(json!({ "success": true }))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "success": false, "error": e }))),
+    }
+}
+
 
