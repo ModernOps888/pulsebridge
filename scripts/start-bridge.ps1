@@ -24,8 +24,8 @@ if (-not $NoTunnel -and (Test-Path $cloudflaredExe)) {
     $logFile = [System.IO.Path]::GetTempFileName()
     $tunnelProc = Start-Process -FilePath $cloudflaredExe -ArgumentList @("tunnel", "--url", "http://127.0.0.1:$Port") -NoNewWindow -PassThru -RedirectStandardError $logFile
     
-    # Wait up to 6 seconds for trycloudflare.com URL
-    for ($i = 0; $i -lt 12; $i++) {
+    # Wait up to 15 seconds for trycloudflare.com URL
+    for ($i = 0; $i -lt 30; $i++) {
         Start-Sleep -Milliseconds 500
         if (Test-Path $logFile) {
             $content = Get-Content $logFile -Raw -ErrorAction SilentlyContinue

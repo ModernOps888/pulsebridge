@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Shield, Lock, Delete, ArrowRight, Sparkles } from 'lucide-react'
 import { hapticLight, hapticSuccess, hapticWarning } from '../utils/haptics'
 
@@ -10,8 +10,15 @@ interface PinLockScreenProps {
 export function PinLockScreen({ onUnlock, error }: PinLockScreenProps) {
   const [pin, setPin] = useState('')
   const [loading, setLoading] = useState(false)
+  const [dismissedError, setDismissedError] = useState(false)
+
+  // Reset dismissal if a new error arrives from backend
+  useEffect(() => {
+    setDismissedError(false)
+  }, [error])
 
   const handleDigit = (digit: string) => {
+    setDismissedError(true)
     if (pin.length < 6) {
       hapticLight()
       const nextPin = pin + digit
@@ -23,6 +30,7 @@ export function PinLockScreen({ onUnlock, error }: PinLockScreenProps) {
   }
 
   const handleDelete = () => {
+    setDismissedError(true)
     hapticLight()
     setPin((prev) => prev.slice(0, -1))
   }
@@ -78,7 +86,7 @@ export function PinLockScreen({ onUnlock, error }: PinLockScreenProps) {
           ))}
         </div>
 
-        {error && (
+        {error && !dismissedError && (
           <p className="text-xs text-rose-400 text-center animate-bounce font-medium mt-3">
             {error}
           </p>

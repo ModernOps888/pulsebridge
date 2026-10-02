@@ -9,10 +9,6 @@ export function usePulseBridge() {
     const urlToken = params.get('token')
     if (urlToken) {
       localStorage.setItem('pulsebridge_token', urlToken)
-      // Immediately scrub sensitive credentials from the browser address bar
-      if (typeof window !== 'undefined' && window.history && window.history.replaceState) {
-        window.history.replaceState({}, document.title, window.location.pathname)
-      }
       return urlToken
     }
     return localStorage.getItem('pulsebridge_token')
@@ -40,6 +36,7 @@ export function usePulseBridge() {
 
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectTimeoutRef = useRef<number | null>(null)
+  const connectedTokenRef = useRef<string | null>(null)
 
   const toggleSound = () => {
     const next = pulseAudio.toggleSound()
@@ -94,10 +91,31 @@ export function usePulseBridge() {
   }
 
   const connectWebSocket = useCallback((authToken: string) => {
+    // If the socket is already open with the same token, nothing to do
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      if (connectedTokenRef.current === authToken) {
+        return
+      }
+      // If open with a different token, re-authenticate immediately on existing socket
+      connectedTokenRef.current = authToken
+      wsRef.current.send(JSON.stringify({ type: 'auth', payload: { token: authToken } }))
       return
     }
 
+    // If socket is connecting with the same token, do not interrupt
+    if (wsRef.current && wsRef.current.readyState === WebSocket.CONNECTING && connectedTokenRef.current === authToken) {
+      return
+    }
+
+    // Clean up previous socket if any
+    if (wsRef.current) {
+      try {
+        wsRef.current.close()
+      } catch (_) {}
+      wsRef.current = null
+    }
+
+    connectedTokenRef.current = authToken
     const host = window.location.host
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const wsUrl = `${protocol}//${host}/ws?token=${encodeURIComponent(authToken)}`
@@ -108,7 +126,7 @@ export function usePulseBridge() {
     ws.onopen = () => {
       setIsConnected(true)
       setAuthError(null)
-      // Send auth frame explicitly as well
+      // Send auth frame explicitly to confirm authentication
       ws.send(JSON.stringify({ type: 'auth', payload: { token: authToken } }))
     }
 
@@ -125,6 +143,13 @@ export function usePulseBridge() {
               setAuthError(msg.payload.message || 'Authentication rejected')
               setToken(null)
               localStorage.removeItem('pulsebridge_token')
+              connectedTokenRef.current = null
+              if (wsRef.current) {
+                try {
+                  wsRef.current.close()
+                } catch (_) {}
+                wsRef.current = null
+              }
             }
             break
 
@@ -192,19 +217,26 @@ export function usePulseBridge() {
     ws.onclose = () => {
       setIsConnected(false)
       wsRef.current = null
-      // Auto-reconnect after 2 seconds
+      connectedTokenRef.current = null
+      // Auto-reconnect after 2 seconds if valid token exists in storage
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current)
+      }
       reconnectTimeoutRef.current = window.setTimeout(() => {
-        if (token) {
-          connectWebSocket(token)
+        const storedToken = localStorage.getItem('pulsebridge_token')
+        if (storedToken) {
+          connectWebSocket(storedToken)
         }
       }, 2000)
     }
 
     ws.onerror = (err) => {
       console.warn('WebSocket error:', err)
-      ws.close()
+      try {
+        ws.close()
+      } catch (_) {}
     }
-  }, [token])
+  }, [])
 
   // Login via 6-digit PIN
   const loginWithPin = async (pin: string): Promise<boolean> => {
@@ -221,6 +253,7 @@ export function usePulseBridge() {
         setToken(data.token)
         localStorage.setItem('pulsebridge_token', data.token)
         setIsAuthenticated(true)
+        setAuthError(null)
         connectWebSocket(data.token)
         triggerHaptic([40, 60])
         return true
@@ -239,8 +272,12 @@ export function usePulseBridge() {
     setToken(null)
     setIsAuthenticated(false)
     localStorage.removeItem('pulsebridge_token')
+    connectedTokenRef.current = null
     if (wsRef.current) {
-      wsRef.current.close()
+      try {
+        wsRef.current.close()
+      } catch (_) {}
+      wsRef.current = null
     }
   }
 
@@ -425,11 +462,35 @@ export function usePulseBridge() {
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current)
       }
-      if (wsRef.current) {
-        wsRef.current.close()
-      }
     }
   }, [token, connectWebSocket])
+
+  // Cleanup WebSocket on hook unmount
+  useEffect(() => {
+    return () => {
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current)
+      }
+      if (wsRef.current) {
+        try {
+          wsRef.current.close()
+        } catch (_) {}
+        wsRef.current = null
+      }
+    }
+  }, [])
+
+  // Scrub credentials from URL once safely authenticated
+  useEffect(() => {
+    if (isAuthenticated && typeof window !== 'undefined' && window.history && window.history.replaceState) {
+      const url = new URL(window.location.href)
+      if (url.searchParams.has('pin') || url.searchParams.has('token')) {
+        url.searchParams.delete('pin')
+        url.searchParams.delete('token')
+        window.history.replaceState({}, document.title, url.pathname + (url.search ? url.search : ''))
+      }
+    }
+  }, [isAuthenticated])
 
   const refreshProjects = useCallback(async () => {
     if (!token) return

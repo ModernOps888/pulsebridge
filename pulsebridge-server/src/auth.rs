@@ -17,6 +17,23 @@ pub struct AuthManager {
     tunnel_url: Arc<RwLock<Option<String>>>,
 }
 
+fn load_persisted_tokens() -> HashSet<String> {
+    let path = std::env::temp_dir().join("pulsebridge_tokens.json");
+    if let Ok(data) = std::fs::read_to_string(&path) {
+        if let Ok(tokens) = serde_json::from_str::<HashSet<String>>(&data) {
+            return tokens;
+        }
+    }
+    HashSet::new()
+}
+
+fn save_persisted_tokens(tokens: &HashSet<String>) {
+    let path = std::env::temp_dir().join("pulsebridge_tokens.json");
+    if let Ok(json) = serde_json::to_string(tokens) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
 #[allow(dead_code)]
 impl AuthManager {
     pub fn new(port: u16, custom_pin: Option<String>, tunnel_url: Option<String>) -> Self {
@@ -33,8 +50,9 @@ impl AuthManager {
             .map(|ip| ip.to_string())
             .unwrap_or_else(|_| "127.0.0.1".to_string());
 
-        let mut auth_tokens = HashSet::new();
+        let mut auth_tokens = load_persisted_tokens();
         auth_tokens.insert(secret_token.clone());
+        save_persisted_tokens(&auth_tokens);
 
         Self {
             pin,
@@ -150,7 +168,11 @@ impl AuthManager {
             // Reset failed counter
             self.failed_attempts.write().remove(client_ip);
             let new_token = Uuid::new_v4().to_string();
-            self.authorized_tokens.write().insert(new_token.clone());
+            {
+                let mut tokens = self.authorized_tokens.write();
+                tokens.insert(new_token.clone());
+                save_persisted_tokens(&tokens);
+            }
             Ok(new_token)
         } else {
             // Increment failed attempts
