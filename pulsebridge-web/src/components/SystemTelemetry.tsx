@@ -12,6 +12,7 @@ import {
   Check,
 } from 'lucide-react'
 import type { SystemTelemetry as SystemTelemetryType } from '../types'
+import { hapticLight, hapticSuccess } from '../utils/haptics'
 
 interface SystemTelemetryProps {
   telemetry: SystemTelemetryType | null
@@ -129,8 +130,11 @@ export function SystemTelemetry({ telemetry, token }: SystemTelemetryProps) {
             <h3 className="text-xs font-bold text-gray-200">Phone Pairing QR Code</h3>
           </div>
           <button
-            onClick={() => setShowQr(!showQr)}
-            className="text-[11px] font-bold text-amber-400 hover:text-amber-300 font-mono"
+            onClick={() => {
+              hapticLight()
+              setShowQr(!showQr)
+            }}
+            className="text-[11px] font-bold text-amber-400 hover:text-amber-300 font-mono active:scale-95 transition-all"
           >
             {showQr ? 'Hide' : 'Display QR'}
           </button>
@@ -145,12 +149,13 @@ export function SystemTelemetry({ telemetry, token }: SystemTelemetryProps) {
             {token && (
               <button
                 onClick={() => {
+                  hapticSuccess()
                   const directUrl = `${window.location.origin}/?token=${token}`
                   navigator.clipboard.writeText(directUrl)
                   setCopied(true)
                   setTimeout(() => setCopied(false), 2000)
                 }}
-                className="mt-3 text-[10px] bg-[#060907] text-amber-400 border border-amber-500/40 px-3 py-1.5 rounded-xl flex items-center gap-1.5 font-bold shadow-sm"
+                className="mt-3 text-[10px] bg-[#060907] text-amber-400 border border-amber-500/40 px-3 py-1.5 rounded-xl flex items-center gap-1.5 font-bold shadow-sm active:scale-95 transition-all"
               >
                 {copied ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3 text-amber-400" />}
                 <span>{copied ? 'Link Copied!' : 'Copy Direct Pairing Link'}</span>

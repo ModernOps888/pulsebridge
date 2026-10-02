@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Shield, Lock, Delete, ArrowRight, Sparkles } from 'lucide-react'
+import { hapticLight, hapticSuccess, hapticWarning } from '../utils/haptics'
 
 interface PinLockScreenProps {
   onUnlock: (pin: string) => Promise<boolean>
@@ -12,6 +13,7 @@ export function PinLockScreen({ onUnlock, error }: PinLockScreenProps) {
 
   const handleDigit = (digit: string) => {
     if (pin.length < 6) {
+      hapticLight()
       const nextPin = pin + digit
       setPin(nextPin)
       if (nextPin.length === 6) {
@@ -21,6 +23,7 @@ export function PinLockScreen({ onUnlock, error }: PinLockScreenProps) {
   }
 
   const handleDelete = () => {
+    hapticLight()
     setPin((prev) => prev.slice(0, -1))
   }
 
@@ -29,7 +32,10 @@ export function PinLockScreen({ onUnlock, error }: PinLockScreenProps) {
     setLoading(true)
     const success = await onUnlock(codeToSubmit)
     setLoading(false)
-    if (!success) {
+    if (success) {
+      hapticSuccess()
+    } else {
+      hapticWarning()
       setPin('')
     }
   }

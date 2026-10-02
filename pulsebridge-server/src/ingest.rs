@@ -31,6 +31,7 @@ pub struct IngestEventPayload {
 
 #[derive(Debug, Deserialize)]
 pub struct SendPromptPayload {
+    #[serde(alias = "prompt")]
     pub message: String,
     pub target_ide: Option<String>,
     pub target_project: Option<String>,

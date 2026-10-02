@@ -1022,37 +1022,37 @@ export function IdePreview({
           </div>
         </div>
 
-        <div className="grid grid-cols-4 gap-2">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
           <button
             onClick={() => triggerRemoteScroll(120)}
-            className="py-2 rounded-xl bg-[#0d140f] border border-emerald-950 hover:border-amber-400 text-emerald-200 active:bg-amber-600 active:text-black transition-all flex items-center justify-center gap-1"
+            className="py-2 px-2 rounded-xl bg-[#0d140f] border border-emerald-950 hover:border-amber-400 text-emerald-200 active:bg-amber-600 active:text-black transition-all flex items-center justify-center gap-1.5 min-w-0"
           >
-            <ChevronUp className="w-3.5 h-3.5 text-amber-400" />
-            <span className="text-[10px] font-bold">Scroll Up</span>
+            <ChevronUp className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            <span className="text-[10px] font-bold truncate">Scroll Up</span>
           </button>
 
           <button
             onClick={() => triggerRemoteScroll(-120)}
-            className="py-2 rounded-xl bg-[#0d140f] border border-emerald-950 hover:border-amber-400 text-emerald-200 active:bg-amber-600 active:text-black transition-all flex items-center justify-center gap-1"
+            className="py-2 px-2 rounded-xl bg-[#0d140f] border border-emerald-950 hover:border-amber-400 text-emerald-200 active:bg-amber-600 active:text-black transition-all flex items-center justify-center gap-1.5 min-w-0"
           >
-            <ChevronDown className="w-3.5 h-3.5 text-amber-400" />
-            <span className="text-[10px] font-bold">Scroll Down</span>
+            <ChevronDown className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            <span className="text-[10px] font-bold truncate">Scroll Down</span>
           </button>
 
           <button
             onClick={() => sendHotkey('pageup')}
-            className="py-2 rounded-xl bg-[#0d140f] border border-emerald-950 hover:border-amber-400 text-emerald-200 active:bg-amber-600 active:text-black transition-all flex items-center justify-center gap-1"
+            className="py-2 px-2 rounded-xl bg-[#0d140f] border border-emerald-950 hover:border-amber-400 text-emerald-200 active:bg-amber-600 active:text-black transition-all flex items-center justify-center gap-1.5 min-w-0"
           >
-            <ChevronsUp className="w-3.5 h-3.5 text-amber-400" />
-            <span className="text-[10px] font-bold">Page Up</span>
+            <ChevronsUp className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            <span className="text-[10px] font-bold truncate">Page Up</span>
           </button>
 
           <button
             onClick={() => sendHotkey('pagedown')}
-            className="py-2 rounded-xl bg-[#0d140f] border border-emerald-950 hover:border-amber-400 text-emerald-200 active:bg-amber-600 active:text-black transition-all flex items-center justify-center gap-1"
+            className="py-2 px-2 rounded-xl bg-[#0d140f] border border-emerald-950 hover:border-amber-400 text-emerald-200 active:bg-amber-600 active:text-black transition-all flex items-center justify-center gap-1.5 min-w-0"
           >
-            <ChevronsDown className="w-3.5 h-3.5 text-amber-400" />
-            <span className="text-[10px] font-bold">Page Down</span>
+            <ChevronsDown className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            <span className="text-[10px] font-bold truncate">Page Down</span>
           </button>
         </div>
       </div>
@@ -1081,10 +1081,10 @@ export function IdePreview({
             <button
               key={key.id}
               onClick={() => sendHotkey(key.id)}
-              className="py-2 px-1 rounded-xl bg-[#0d140f] border border-emerald-950 hover:border-amber-400 text-emerald-200 active:bg-amber-600 active:text-black transition-all text-center flex flex-col items-center justify-center hover:scale-[1.02]"
+              className="py-1.5 sm:py-2 px-1 rounded-xl bg-[#0d140f] border border-emerald-950 hover:border-amber-400 text-emerald-200 active:bg-amber-600 active:text-black transition-all text-center flex flex-col items-center justify-center hover:scale-[1.02] min-w-0 overflow-hidden"
             >
-              <span className="text-[11px] font-mono font-bold text-amber-400">{key.label}</span>
-              <span className="text-[8px] text-emerald-500/80 truncate max-w-full">{key.hint}</span>
+              <span className="text-[10px] sm:text-[11px] font-mono font-bold text-amber-400 truncate max-w-full">{key.label}</span>
+              <span className="text-[7.5px] sm:text-[8px] text-emerald-500/80 truncate max-w-full">{key.hint}</span>
             </button>
           ))}
         </div>
@@ -1104,10 +1104,10 @@ export function IdePreview({
             <button
               key={key.id}
               onClick={() => sendHotkey(key.id)}
-              className="py-2 px-1 rounded-xl bg-[#0d140f] border border-emerald-950 hover:border-amber-400 text-emerald-200 active:bg-amber-600 active:text-black transition-all text-center flex flex-col items-center justify-center hover:scale-[1.02]"
+              className="py-1.5 sm:py-2 px-1 rounded-xl bg-[#0d140f] border border-emerald-950 hover:border-amber-400 text-emerald-200 active:bg-amber-600 active:text-black transition-all text-center flex flex-col items-center justify-center hover:scale-[1.02] min-w-0 overflow-hidden"
             >
-              <span className="text-[11px] font-mono font-bold text-emerald-300">{key.label}</span>
-              <span className="text-[8px] text-emerald-500/80 truncate max-w-full">{key.hint}</span>
+              <span className="text-[10px] sm:text-[11px] font-mono font-bold text-emerald-300 truncate max-w-full">{key.label}</span>
+              <span className="text-[7.5px] sm:text-[8px] text-emerald-500/80 truncate max-w-full">{key.hint}</span>
             </button>
           ))}
         </div>

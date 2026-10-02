@@ -257,7 +257,7 @@ export function RemoteControlDrawer({
         </div>
 
         {/* Action Mode Pills */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 pt-2">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2">
           {[
             { id: 'inject_window', label: 'Type in Active IDE', icon: Zap },
             { id: 'direct_inbox', label: 'Queue in Inbox', icon: Sparkles },
@@ -270,14 +270,14 @@ export function RemoteControlDrawer({
               <button
                 key={mode.id}
                 onClick={() => setActionMode(mode.id as any)}
-                className={`p-2 rounded-xl text-[10px] font-bold border flex flex-col items-center gap-1 transition-all ${
+                className={`p-2 rounded-xl text-[10px] font-bold border flex flex-col items-center justify-center gap-1 transition-all min-w-0 min-h-[54px] overflow-hidden ${
                   isSelected
                     ? 'bg-amber-950/80 border-amber-400 text-amber-300 ring-1 ring-amber-400/40'
                     : 'bg-[#0d140f] border-emerald-950 text-emerald-400 hover:text-emerald-200'
                 }`}
               >
-                <Icon className="w-3.5 h-3.5" />
-                <span>{mode.label}</span>
+                <Icon className="w-3.5 h-3.5 shrink-0" />
+                <span className="truncate max-w-full text-center leading-tight">{mode.label}</span>
               </button>
             )
           })}
@@ -341,7 +341,7 @@ export function RemoteControlDrawer({
           DevOps Quick Runbook (1-Tap PC Shell)
         </span>
 
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
           {[
             { label: 'git status', cmd: 'git status' },
             { label: 'git diff --stat', cmd: 'git diff --stat' },
@@ -356,9 +356,9 @@ export function RemoteControlDrawer({
               key={i}
               onClick={() => handleQuickCommand(action.cmd)}
               disabled={loading}
-              className="p-2 rounded-xl bg-[#0d140f] border border-emerald-950 hover:border-amber-400 text-emerald-300 active:bg-amber-600 active:text-black transition-all text-center flex flex-col items-center justify-center font-mono text-[10px] font-bold"
+              className="p-2 rounded-xl bg-[#0d140f] border border-emerald-950 hover:border-amber-400 text-emerald-300 active:bg-amber-600 active:text-black transition-all text-center flex flex-col items-center justify-center font-mono text-[10px] font-bold min-w-0 overflow-hidden"
             >
-              {action.label}
+              <span className="truncate max-w-full">{action.label}</span>
             </button>
           ))}
         </div>
