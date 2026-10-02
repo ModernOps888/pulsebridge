@@ -23,6 +23,7 @@ pub struct AntigravityWatcher {
     base_brain_dir: PathBuf,
     tracked: HashMap<String, TrackedConversation>,
     most_recent_conv_id: Option<String>,
+    has_indexed_history: bool,
 }
 
 impl AntigravityWatcher {
@@ -37,6 +38,7 @@ impl AntigravityWatcher {
             base_brain_dir,
             tracked: HashMap::new(),
             most_recent_conv_id: None,
+            has_indexed_history: false,
         }
     }
 
@@ -45,7 +47,13 @@ impl AntigravityWatcher {
             return;
         }
 
-        let candidates = self.find_recent_conversations(10);
+        // On first run, index all live projects and recent historical conversations across the system
+        if !self.has_indexed_history {
+            self.has_indexed_history = true;
+            self.index_live_projects_and_history(state);
+        }
+
+        let candidates = self.find_recent_conversations(12, 30);
         if candidates.is_empty() {
             return;
         }
@@ -59,23 +67,28 @@ impl AntigravityWatcher {
             self.parse_task_progress(top_conv_id, state);
         }
 
-        // Process all active conversations to collect multi-project chats
+        let live_projects = Self::discover_live_projects();
+
+        // Process active conversations to collect multi-project chat increments
         for (conv_id, transcript_path, modified) in candidates {
             let conv_dir = self.base_brain_dir.join(&conv_id);
 
             // Register newly discovered conversation
             if !self.tracked.contains_key(&conv_id) {
-                let (project_name, conversation_title) = Self::detect_project_and_title(&conv_id, &conv_dir, &transcript_path);
+                let (project_name, conversation_title) = Self::detect_project_and_title(&conv_id, &conv_dir, &transcript_path, &live_projects);
+                let project_path = live_projects.iter().find(|(n, _, _)| n.eq_ignore_ascii_case(&project_name)).map(|(_, p, _)| p.clone());
+                let mod_rfc = chrono::DateTime::<Local>::from(modified).to_rfc3339();
                 
                 state.update_project_info(ProjectChatInfo {
                     id: conv_id.clone(),
                     project_name: project_name.clone(),
                     conversation_title: conversation_title.clone(),
                     ide: IdeSource::Antigravity,
-                    last_updated: Local::now().to_rfc3339(),
+                    last_updated: mod_rfc,
                     step_count: 0,
                     latest_message_snippet: None,
                     status: "active".to_string(),
+                    project_path,
                 });
 
                 self.tracked.insert(conv_id.clone(), TrackedConversation {
@@ -104,11 +117,134 @@ impl AntigravityWatcher {
         }
     }
 
-    fn find_recent_conversations(&self, limit: usize) -> Vec<(String, PathBuf, SystemTime)> {
+    fn index_live_projects_and_history(&mut self, state: &SharedState) {
+        let live_projects = Self::discover_live_projects();
+
+        // 1. Register base project workspaces for live folders on disk (modified within 30 days)
+        for (name, path, mod_time) in &live_projects {
+            let mod_rfc = chrono::DateTime::<Local>::from(*mod_time).to_rfc3339();
+            state.update_project_info(ProjectChatInfo {
+                id: format!("project-{}", name.to_lowercase()),
+                project_name: name.clone(),
+                conversation_title: format!("{name} Live Workspace"),
+                ide: IdeSource::Antigravity,
+                last_updated: mod_rfc,
+                step_count: 0,
+                latest_message_snippet: Some(format!("Workspace root: {path}")),
+                status: "active".to_string(),
+                project_path: Some(path.clone()),
+            });
+        }
+
+        // 2. Index historical sessions from brain within the last 30 days
+        let all_sessions = self.find_recent_conversations(60, 30);
+        for (conv_id, transcript_path, modified_time) in all_sessions {
+            let conv_dir = self.base_brain_dir.join(&conv_id);
+            let (proj_name, conv_title) = Self::detect_project_and_title(&conv_id, &conv_dir, &transcript_path, &live_projects);
+            let project_path = live_projects.iter().find(|(n, _, _)| n.eq_ignore_ascii_case(&proj_name)).map(|(_, p, _)| p.clone());
+            
+            let mod_rfc = chrono::DateTime::<Local>::from(modified_time).to_rfc3339();
+            let (step_count, snippet) = Self::inspect_transcript_summary(&transcript_path);
+
+            state.update_project_info(ProjectChatInfo {
+                id: conv_id,
+                project_name: proj_name,
+                conversation_title: conv_title,
+                ide: IdeSource::Antigravity,
+                last_updated: mod_rfc,
+                step_count,
+                latest_message_snippet: snippet,
+                status: "active".to_string(),
+                project_path,
+            });
+        }
+    }
+
+    pub fn discover_live_projects() -> Vec<(String, String, SystemTime)> {
+        let mut projects = Vec::new();
+        let ignored = [
+            "$recycle.bin", "windows", "program files", "program files (x86)",
+            "programdata", "perflogs", "inetpub", "msys64", "users", "temp",
+            "intel", "xboxgames", "documents and settings", "recovery", "system volume information"
+        ];
+
+        let now = SystemTime::now();
+        let max_age_secs = 30 * 24 * 3600;
+        let cutoff = now.checked_sub(std::time::Duration::from_secs(max_age_secs)).unwrap_or(SystemTime::UNIX_EPOCH);
+
+        if let Ok(entries) = fs::read_dir("C:\\") {
+            for entry in entries.flatten() {
+                if let Ok(ft) = entry.file_type() {
+                    if ft.is_dir() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if !name.starts_with('.') && !ignored.iter().any(|&ign| ign.eq_ignore_ascii_case(&name)) {
+                            let path = entry.path();
+                            let mod_time = path.metadata().and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+                            // Only include projects modified within the last 30 days
+                            if mod_time >= cutoff {
+                                projects.push((name, path.to_string_lossy().to_string(), mod_time));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Prioritize key projects so they appear first in the catalogue
+        let priority = ["PulseBridge", "Infinity", "Axiom", "Harness", "Marketing", "Clients", "InfinityTrader", "BRain"];
+        projects.sort_by(|a, b| {
+            let idx_a = priority.iter().position(|&p| p.eq_ignore_ascii_case(&a.0)).unwrap_or(999);
+            let idx_b = priority.iter().position(|&p| p.eq_ignore_ascii_case(&b.0)).unwrap_or(999);
+            idx_a.cmp(&idx_b).then_with(|| b.2.cmp(&a.2))
+        });
+
+        projects
+    }
+
+    fn inspect_transcript_summary(transcript_path: &Path) -> (usize, Option<String>) {
+        let mut count = 0;
+        let mut snippet = None;
+        if let Ok(file) = File::open(transcript_path) {
+            let reader = BufReader::new(file);
+            for line_res in reader.lines() {
+                if let Ok(line) = line_res {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        count += 1;
+                        if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+                            if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
+                                let clean = content
+                                    .trim_start_matches("<USER_REQUEST>")
+                                    .trim_end_matches("</USER_REQUEST>")
+                                    .trim();
+                                if !clean.is_empty() && !clean.starts_with('<') {
+                                    let s = if clean.chars().count() > 85 {
+                                        let trunc: String = clean.chars().take(82).collect();
+                                        format!("{trunc}...")
+                                    } else {
+                                        clean.to_string()
+                                    };
+                                    // Retain the latest user message snippet for preview
+                                    snippet = Some(s);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        (count, snippet)
+    }
+
+    fn find_recent_conversations(&self, limit: usize, max_age_days: u64) -> Vec<(String, PathBuf, SystemTime)> {
         let entries = match fs::read_dir(&self.base_brain_dir) {
             Ok(e) => e,
             Err(_) => return Vec::new(),
         };
+
+        let now = SystemTime::now();
+        let max_age_secs = max_age_days * 24 * 3600;
+        let cutoff = now.checked_sub(std::time::Duration::from_secs(max_age_secs)).unwrap_or(SystemTime::UNIX_EPOCH);
 
         let mut candidates: Vec<(String, PathBuf, SystemTime)> = Vec::new();
 
@@ -127,7 +263,9 @@ impl AntigravityWatcher {
                 if transcript.exists() {
                     if let Ok(metadata) = transcript.metadata() {
                         let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-                        candidates.push((conv_id, transcript, modified));
+                        if modified >= cutoff {
+                            candidates.push((conv_id, transcript, modified));
+                        }
                     }
                 }
             }
@@ -138,7 +276,12 @@ impl AntigravityWatcher {
         candidates
     }
 
-    fn detect_project_and_title(conv_id: &str, conv_dir: &Path, transcript_path: &Path) -> (String, String) {
+    fn detect_project_and_title(
+        conv_id: &str,
+        conv_dir: &Path,
+        transcript_path: &Path,
+        live_projects: &[(String, String, SystemTime)],
+    ) -> (String, String) {
         let mut project_name = "PulseBridge".to_string();
         let mut conv_title = format!("Session {}", &conv_id[..conv_id.len().min(8)]);
 
@@ -168,13 +311,20 @@ impl AntigravityWatcher {
         // 2. Inspect first lines of transcript.jsonl for workspace/project indicators
         if let Ok(file) = File::open(transcript_path) {
             let reader = BufReader::new(file);
-            for line_res in reader.lines().take(6) {
+            for line_res in reader.lines().take(25) {
                 if let Ok(line) = line_res {
                     let lower = line.to_lowercase();
-                    if lower.contains("c:\\\\infinity") || lower.contains("c:/infinity") || lower.contains("claude-academy") || lower.contains("academy") {
-                        project_name = "Infinity TechStack".to_string();
-                    } else if lower.contains("c:\\\\pulsebridge") || lower.contains("c:/pulsebridge") {
-                        project_name = "PulseBridge".to_string();
+                    
+                    // Match against all known live projects
+                    for (name, _, _) in live_projects {
+                        let name_lower = name.to_lowercase();
+                        if lower.contains(&format!("c:\\\\{}", name_lower)) 
+                            || lower.contains(&format!("c:/{}", name_lower))
+                            || lower.contains(&format!("/{}/", name_lower))
+                        {
+                            project_name = name.clone();
+                            break;
+                        }
                     }
 
                     // Extract title from first user prompt if still default
@@ -184,7 +334,10 @@ impl AntigravityWatcher {
                             if is_user {
                                 if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
                                     for cl in content.lines() {
-                                        let t = cl.trim();
+                                        let t = cl.trim()
+                                            .trim_start_matches("<USER_REQUEST>")
+                                            .trim_end_matches("</USER_REQUEST>")
+                                            .trim();
                                         if !t.is_empty() && !t.starts_with('<') {
                                             let clean = if t.chars().count() > 60 {
                                                 let trunc: String = t.chars().take(57).collect();
@@ -243,7 +396,7 @@ impl AntigravityWatcher {
         }
     }
 
-    fn parse_json_step(v: &Value, conv_id: &str) -> Option<ChatStep> {
+    pub fn parse_json_step(v: &Value, conv_id: &str) -> Option<ChatStep> {
         let step_index = v.get("step_index").and_then(|x| x.as_u64()).unwrap_or(0);
         let source = v.get("source").and_then(|x| x.as_str()).unwrap_or("SYSTEM").to_string();
         let step_type = v.get("type").and_then(|x| x.as_str()).unwrap_or("STEP").to_string();

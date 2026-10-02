@@ -71,6 +71,7 @@ impl SharedState {
             step_count: 0,
             latest_message_snippet: Some("Monitoring workstation and IDE stream".to_string()),
             status: "active".to_string(),
+            project_path: Some("C:\\PulseBridge".to_string()),
         });
 
         Self {
@@ -147,6 +148,7 @@ impl SharedState {
                 step_count: 0,
                 latest_message_snippet: None,
                 status: "active".to_string(),
+                project_path: Some(format!("C:\\{}", proj_name)),
             });
             entry.step_count += 1;
             entry.last_updated = step.timestamp.clone();
@@ -250,7 +252,21 @@ impl SharedState {
     }
 
     pub fn get_project_chats(&self) -> Vec<ProjectChatInfo> {
-        let mut list: Vec<ProjectChatInfo> = self.inner.projects.read().values().cloned().collect();
+        self.get_project_chats_filtered(Some(30))
+    }
+
+    pub fn get_project_chats_filtered(&self, max_age_days: Option<u64>) -> Vec<ProjectChatInfo> {
+        let days = max_age_days.unwrap_or(30);
+        let cutoff_millis = chrono::Utc::now().timestamp_millis() - (days as i64 * 24 * 3600 * 1000);
+
+        let mut list: Vec<ProjectChatInfo> = self.inner.projects.read().values().filter(|p| {
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&p.last_updated) {
+                dt.timestamp_millis() >= cutoff_millis
+            } else {
+                true
+            }
+        }).cloned().collect();
+
         list.sort_by(|a, b| b.last_updated.cmp(&a.last_updated));
         list
     }

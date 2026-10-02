@@ -86,11 +86,8 @@ PulseBridge is built as a zero-dependency, ultra-lightweight native bridge compr
 ### 1. 🖥️ TeamViewer Mode for AI IDEs & High-DPI Zoom
 - **Sub-Millisecond Native Screen Streaming**: Leverages Windows GDI with DWM desktop attachment (`OpenWindowStationA("WinSta0")` + `SetThreadDesktop` + `SetProcessDPIAware()`) and hardware `StretchBlt` scaling. Delivers fluid desktop captures with an in-memory 150ms dynamic cache running at **75+ req/sec** under sustained load.
 - **High-Visibility Gilded Scrollbars & 150%+ Zooming**: Engineered for high-resolution mobile viewports with **12px wide high-contrast radiant gold and cyber emerald scrollbars**, ensuring smooth scrolling even when zoomed in to 150% or 200%.
-- **Dual Interaction Modes**:
-  - `👆 Tap Mode (Remote Click)`: Direct DPI-calibrated mouse clicks projected into your active IDE window or terminal.
-  - `✋ Pan Mode (Canvas Drag)`: Touch-drag panning across the zoomed desktop without accidentally triggering remote clicks.
-- **On-Screen Pan D-Pad Controller**: Floating directional pad (`▲`, `▼`, `◄`, `►`, `⌖ Center`) for effortless 1-tap navigation across zoomed high-resolution displays.
-- **Remote Mouse Wheel Scrolling**: Dedicated remote scroll controls (`▲ Scroll Up`, `▼ Scroll Down`, `Page Up`, `Page Down`) with adjustable speed multipliers (1x 120px vs 3x 360px), backed by native Win32 `MOUSEEVENTF_WHEEL` simulation.
+- **Touch Drag/Swipe Remote Mouse Scrolling**: Dragging or swiping vertically on the live remote IDE preview (>22px) issues native Win32 `MOUSEEVENTF_WHEEL` scroll events (`delta: ±120`) mapped directly to your finger's coordinates (`x_ratio, y_ratio`). Subtle floating badges (`Scroll ▲` / `Scroll ▼`) give instant visual confirmation of scroll direction.
+- **Smart Touch Tap Discrimination**: Quick taps (<350ms with minimal travel) execute remote mouse clicks, preserving accurate code, button, and terminal interaction.
 - **Expanded Dev Keyboard Bar**: Rapid 1-tap execution of vital workflow shortcuts:
   - `Ctrl + Z`: Undo code edits
   - `Ctrl + Y`: Redo code edits
@@ -106,25 +103,28 @@ PulseBridge is built as a zero-dependency, ultra-lightweight native bridge compr
   - `Enter`: Submit prompt / execute terminal command
   - `F5`: Launch debugger
 
-### 2. 🔔 Harmonic Audio Chimes & Haptic Telemetry
-- **Zero-Asset Web Audio API Engine**: Real-time harmonic chimes synthesized mathematically on device without downloading external MP3s.
-- **Solfeggio 528Hz & 792Hz Frequencies**: Ascending 3-tone harmonic triad for milestone completions, distinct octave pings for action-required alerts, and ascending chirps on prompt dispatch.
-- **Mute / Unmute Control**: Global one-tap audio toggle in the persistent header with state persistence.
-- **Live Latency & RTT HUD**: Measures true roundtrip latency in milliseconds (`⚡ 24ms`) on every heartbeat.
-- **Haptic Tactile Vibrations**: Tuned millisecond vibration sequences for Android and iOS devices.
+### 2. 📁 Multi-Project Discovery, 7–30d Recency & Folder Trees
+- **Live Project Auto-Discovery**: Automatically resolves active workspaces from `C:\` and storage metadata across **Google Antigravity**, **Cursor AI** (`%APPDATA%\Cursor\User\workspaceStorage`), and **VS Code** (`%APPDATA%\Code\User\workspaceStorage`).
+- **Strict 7–30 Days Recency Window**: Replaced static timestamps with true file/database modification dates (`state.vscdb`, `workspace.json`, directory `LastWriteTime`). Workspaces older than 30 days are automatically excluded.
+- **Interactive 7d / 30d Toggle**: Quick switch in the side panel header dynamically filters projects and chat steps, showing only the conversations that occurred within the selected window.
+- **Live Depth-2 Directory Tree Browser**: Project cards feature dual sub-tabs: **Chats (N)** and **Files (Structure)**. Toggling "Files" queries `/api/project/structure` to display real folder trees up to depth 2 with expandable directories, file size tags, and exclusions for heavy build artifacts (`node_modules`, `target`, `dist`, `.git`).
+- **New Conversation Launcher**: Each project card includes a **➕ New** button to immediately start a fresh conversation targeted at that workspace.
+- **Chat Feed & Preview Trimming**: `filteredSteps` and the on-demand conversation loader restrict chat steps to the 7–30d window (`cutoffTime = Date.now() - days * 86400000`), ensuring that previews and transcripts strictly reflect recent work.
+- **Fresh Preview Snippets**: `inspect_transcript_summary` extracts the most recent prompt snippet rather than the initial first message from when the chat was created.
 
 ### 3. 💬 Interactive Action Cards & Human-in-the-Loop Approvals
 - **Decision Chips in Chat Stream**: When an agent asks a question or proposes actions, PulseBridge renders high-contrast, one-tap clickable buttons in Radiant Gold.
-- **`ask_phone` MCP Tool**: Allows AI agents to directly request user confirmation (`["Deploy to Prod", "Run Tests First", "Cancel"]`) with instant alert chimes.
+- **`ask_phone` MCP Tool**: Allows AI agents to directly request user confirmation (`["Deploy to Prod", "Run Tests First", "Cancel"]`) with instant alert notifications.
 - **Seamless Prompting on 4G**: Send prompt revisions, bug fixes, or new directives from your phone while away from your desk.
 - **Native Precision Caret Injection**: The host attaches to the interactive desktop thread (`AttachThreadInput`), auto-focuses the AI IDE prompt textarea, securely injects text via `CF_UNICODETEXT` clipboard buffer, and triggers submission with hardware scan codes (`MapVirtualKeyW(VK_RETURN)`).
 - **Hands-Free Speech-to-Text**: Integrated Web Speech API dictation allows hands-free voice prompting directly from your smartphone microphone.
 - **Dual-Mode Queueing**: Choose between immediate window injection or background agent inbox queueing (`.inbox/prompt_queue.json`).
 
-### 4. 🧠 Live Agent Stream & Task Tracking
+### 4. 🧠 Live Agent Stream & Multi-IDE Telemetry
 - **Antigravity Brain Sync**: Monitors `transcript.jsonl` in real time to display live thought processes, tool invocations, and execution status.
 - **Living Checklists**: Dynamically parses task files (`task.md`, `implementation_plan.md`) to show real-time progress bars and milestone completion percentages.
-- **Cursor & VS Code Support**: Automatically tails Cursor Composer workspaces and VS Code Copilot/Cline output channels.
+- **Cursor & VS Code Full Parity**: Tails Cursor Composer workspaces and VS Code Copilot/Cline output channels with equal first-class support.
+- **Automated Verification Suite**: Validated with [`tests/test_live_system.py`](tests/test_live_system.py) passing all checks for auth, projects, structure, historical chat, scroll ratios, and cross-IDE injection.
 
 ### 4. 🛡️ Enterprise SecOps & Zero-Trust Defense
 - **Zero-Trust Token Verification**: Every action endpoint (`/api/action/*`, `/api/ingest/*`) and WebSocket event stream is strictly gated behind verified Bearer tokens. Unauthenticated requests are rejected immediately.

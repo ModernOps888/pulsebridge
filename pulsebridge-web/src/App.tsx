@@ -20,13 +20,13 @@ export function App() {
     chatSteps,
     projects,
     refreshProjects,
+    loadConversationHistory,
+    fetchProjectStructure,
     telemetry,
     windows,
     latestFrame,
     alerts,
     latencyMs,
-    isSoundEnabled,
-    toggleSound,
     notificationPermission,
     requestNotificationPermission,
     fetchWorkstationClipboard,
@@ -62,8 +62,6 @@ export function App() {
         activeIde={task?.active_ide}
         telemetry={telemetry}
         latencyMs={latencyMs}
-        isSoundEnabled={isSoundEnabled}
-        onToggleSound={toggleSound}
         onLock={logout}
         onEmergencyStop={emergencyStop}
       />
@@ -111,6 +109,8 @@ export function App() {
             projects={projects}
             onSendPrompt={sendPrompt}
             onRefreshProjects={refreshProjects}
+            onLoadConversation={loadConversationHistory}
+            onFetchProjectStructure={fetchProjectStructure}
           />
         )}
         {activeTab === 'commander' && (

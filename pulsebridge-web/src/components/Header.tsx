@@ -1,4 +1,4 @@
-import { Lock, Battery, BatteryCharging, AlertOctagon, Sparkles, Volume2, VolumeX, Zap } from 'lucide-react'
+import { Lock, Battery, BatteryCharging, AlertOctagon, Sparkles, Zap } from 'lucide-react'
 import type { IdeSource, SystemTelemetry } from '../types'
 import { hapticLight, hapticWarning } from '../utils/haptics'
 
@@ -18,8 +18,6 @@ export function Header({
   activeIde = 'antigravity',
   telemetry,
   latencyMs,
-  isSoundEnabled = true,
-  onToggleSound,
   onLock,
   onEmergencyStop,
 }: HeaderProps) {
@@ -78,23 +76,6 @@ export function Header({
               <Zap className="w-3 h-3 text-amber-400 shrink-0" />
               <span>{latencyMs}ms</span>
             </div>
-          )}
-
-          {onToggleSound && (
-            <button
-              onClick={() => {
-                hapticLight()
-                onToggleSound()
-              }}
-              title={isSoundEnabled ? 'Audio Chimes Enabled' : 'Audio Muted'}
-              className={`p-1.5 rounded-lg border transition-all active:scale-95 ${
-                isSoundEnabled
-                  ? 'bg-amber-950/60 border-amber-600/70 text-amber-300 shadow-[0_0_8px_rgba(251,191,36,0.2)]'
-                  : 'bg-[#0d140f] border-emerald-950 text-gray-500'
-              }`}
-            >
-              {isSoundEnabled ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
-            </button>
           )}
 
           {telemetry?.battery_percent !== undefined && (

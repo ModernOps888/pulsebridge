@@ -22,15 +22,20 @@ import {
   CheckCircle2,
   Copy,
   Check,
+  Plus,
+  FileText,
+  FolderOpen,
 } from 'lucide-react'
-import type { ChatStep, ProjectChatInfo } from '../types'
+import type { ChatStep, ProjectChatInfo, ProjectFileEntry, ProjectStructureResponse } from '../types'
 import { hapticLight, hapticMedium, hapticSuccess } from '../utils/haptics'
 
 interface ChatStreamProps {
   steps: ChatStep[]
   projects?: ProjectChatInfo[]
   onSendPrompt: (msg: string, targetProject?: string) => void
-  onRefreshProjects?: () => void
+  onRefreshProjects?: (days?: number) => void
+  onLoadConversation?: (convId: string, days?: number) => Promise<any>
+  onFetchProjectStructure?: (projectOrPath: string) => Promise<ProjectStructureResponse | null>
 }
 
 function extractOptions(step: ChatStep): string[] {
@@ -64,6 +69,78 @@ interface GroupedProject {
   totalSteps: number
   lastUpdated: string
   conversations: ProjectChatInfo[]
+  projectPath?: string
+}
+
+function FileTreeView({
+  entries,
+  expandedFolders,
+  onToggleFolder,
+  depth = 0,
+}: {
+  entries: ProjectFileEntry[]
+  expandedFolders: Record<string, boolean>
+  onToggleFolder: (path: string) => void
+  depth?: number
+}) {
+  if (!entries || entries.length === 0) {
+    return (
+      <div className="text-[10px] text-gray-500 font-mono italic p-2 text-center">
+        No files found or empty folder
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-0.5" style={{ paddingLeft: depth > 0 ? `${depth * 8}px` : 0 }}>
+      {entries.map((entry) => {
+        const isExpanded = expandedFolders[entry.relative_path] ?? true
+        return (
+          <div key={entry.relative_path} className="text-[10px] font-mono select-none">
+            {entry.is_dir ? (
+              <div>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onToggleFolder(entry.relative_path)
+                  }}
+                  className="w-full flex items-center gap-1.5 py-1 px-1.5 rounded hover:bg-emerald-950/60 text-amber-300 font-semibold transition-all text-left group"
+                >
+                  {isExpanded ? (
+                    <ChevronDown className="w-3 h-3 text-amber-400 shrink-0" />
+                  ) : (
+                    <ChevronRight className="w-3 h-3 text-amber-400 shrink-0" />
+                  )}
+                  <FolderOpen className="w-3.5 h-3.5 text-amber-400 shrink-0 group-hover:text-amber-300" />
+                  <span className="truncate">{entry.name}</span>
+                </button>
+                {isExpanded && entry.children && entry.children.length > 0 && (
+                  <FileTreeView
+                    entries={entry.children}
+                    expandedFolders={expandedFolders}
+                    onToggleFolder={onToggleFolder}
+                    depth={depth + 1}
+                  />
+                )}
+              </div>
+            ) : (
+              <div className="flex items-center justify-between py-0.5 px-1.5 rounded text-emerald-200/90 hover:text-white hover:bg-[#0c140f]">
+                <div className="flex items-center gap-1.5 truncate">
+                  <FileText className="w-3 h-3 text-emerald-500 shrink-0 ml-4" />
+                  <span className="truncate">{entry.name}</span>
+                </div>
+                {entry.size > 0 && (
+                  <span className="text-[8.5px] text-gray-500 shrink-0 font-mono">
+                    {entry.size > 1024 ? `${Math.round(entry.size / 1024)}KB` : `${entry.size}B`}
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
 }
 
 export function ChatStream({
@@ -71,6 +148,8 @@ export function ChatStream({
   projects = [],
   onSendPrompt,
   onRefreshProjects,
+  onLoadConversation,
+  onFetchProjectStructure,
 }: ChatStreamProps) {
   const [inputMessage, setInputMessage] = useState('')
   const [expandedThinking, setExpandedThinking] = useState<Record<string, boolean>>({})
@@ -83,7 +162,68 @@ export function ChatStream({
   const [sidePanelFilter, setSidePanelFilter] = useState('')
   const [copiedId, setCopiedId] = useState<string | null>(null)
 
+  // Project Folder Structure & On-Demand History States
+  const [projectTabs, setProjectTabs] = useState<Record<string, 'chats' | 'structure'>>({})
+  const [structureData, setStructureData] = useState<Record<string, ProjectFileEntry[]>>({})
+  const [structureLoading, setStructureLoading] = useState<Record<string, boolean>>({})
+  const [expandedFolders, setExpandedFolders] = useState<Record<string, boolean>>({})
+  const [loadingConvId, setLoadingConvId] = useState<string | null>(null)
+  // 7-30 days recency filter per user request
+  const [timeFilterDays, setTimeFilterDays] = useState<number>(30)
+
   const chatEndRef = useRef<HTMLDivElement | null>(null)
+
+  const toggleFolder = (folderPath: string) => {
+    hapticLight()
+    setExpandedFolders((prev) => ({
+      ...prev,
+      [folderPath]: prev[folderPath] !== undefined ? !prev[folderPath] : false,
+    }))
+  }
+
+  const handleToggleStructureTab = async (group: GroupedProject, tab: 'chats' | 'structure') => {
+    hapticLight()
+    setProjectTabs((prev) => ({ ...prev, [group.projectName]: tab }))
+
+    if (tab === 'structure' && !structureData[group.projectName] && onFetchProjectStructure) {
+      setStructureLoading((prev) => ({ ...prev, [group.projectName]: true }))
+      try {
+        const query = group.projectPath || group.projectName
+        const res = await onFetchProjectStructure(query)
+        if (res && res.entries) {
+          setStructureData((prev) => ({ ...prev, [group.projectName]: res.entries }))
+        }
+      } catch (err) {
+        console.error('Failed to load project structure', err)
+      } finally {
+        setStructureLoading((prev) => ({ ...prev, [group.projectName]: false }))
+      }
+    }
+  }
+
+  const handleSelectConversation = async (projectName: string, convId: string) => {
+    selectProjectAndChat(projectName, convId)
+    if (onLoadConversation && convId !== 'all' && convId !== 'active') {
+      setLoadingConvId(convId)
+      try {
+        await onLoadConversation(convId, timeFilterDays)
+      } catch (err) {
+        console.error('Failed to load conversation history', err)
+      } finally {
+        setLoadingConvId(null)
+      }
+    }
+  }
+
+  const handleStartNewChat = (projectName: string) => {
+    hapticSuccess()
+    setSelectedProject(projectName)
+    setSelectedConversation('all')
+    setInputMessage('')
+    if (!isSplitView) {
+      setIsSidePanelOpen(false)
+    }
+  }
 
   // Aggregate project names and step counts
   const projectStats = useMemo(() => {
@@ -126,7 +266,7 @@ export function ChatStream({
     }))
   }, [steps, projects])
 
-  // Group conversations hierarchically by project (Antigravity Workspace layout)
+  // Group conversations hierarchically by project (Top 6 projects, up to 6 chats each)
   const groupedProjects = useMemo<GroupedProject[]>(() => {
     const map = new Map<string, GroupedProject>()
 
@@ -138,10 +278,14 @@ export function ChatStream({
         totalSteps: 0,
         lastUpdated: p.last_updated,
         conversations: [],
+        projectPath: p.project_path,
       }
       existing.totalSteps += p.step_count || 0
       if (!existing.conversations.some((c) => c.id === p.id)) {
         existing.conversations.push(p)
+      }
+      if (p.project_path && !existing.projectPath) {
+        existing.projectPath = p.project_path
       }
       if (new Date(p.last_updated) > new Date(existing.lastUpdated || 0)) {
         existing.lastUpdated = p.last_updated
@@ -189,10 +333,28 @@ export function ChatStream({
       }
     }
 
-    return Array.from(map.values()).sort((a, b) => {
-      return new Date(b.lastUpdated || 0).getTime() - new Date(a.lastUpdated || 0).getTime()
-    })
-  }, [projects, steps])
+    // Filter conversations to only those active within timeFilterDays
+    const cutoffTime = Date.now() - timeFilterDays * 24 * 60 * 60 * 1000
+    for (const group of map.values()) {
+      group.conversations = group.conversations
+        .filter((c) => {
+          if (!c.last_updated) return true
+          const t = new Date(c.last_updated).getTime()
+          return isNaN(t) || t >= cutoffTime
+        })
+        .sort((a, b) => new Date(b.last_updated || 0).getTime() - new Date(a.last_updated || 0).getTime())
+    }
+
+    // Sort by recency, filter to active within time window, and return top 6 projects
+    return Array.from(map.values())
+      .filter((g) => {
+        const t = g.lastUpdated ? new Date(g.lastUpdated).getTime() : 0
+        const isRecent = !isNaN(t) && t >= cutoffTime
+        return isRecent && g.conversations.length > 0
+      })
+      .sort((a, b) => new Date(b.lastUpdated || 0).getTime() - new Date(a.lastUpdated || 0).getTime())
+      .slice(0, 6)
+  }, [projects, steps, timeFilterDays])
 
   // Active selected conversation object (if any)
   const activeConversation = useMemo(() => {
@@ -204,9 +366,19 @@ export function ChatStream({
     return null
   }, [groupedProjects, selectedConversation])
 
-  // Filter steps based on selected project, conversation, and search query
+  // Filter steps based on selected project, conversation, search query, and 7-30d recency
   const filteredSteps = useMemo(() => {
+    const cutoffTime = Date.now() - timeFilterDays * 24 * 60 * 60 * 1000
+
     return steps.filter((step) => {
+      // Enforce 7-30d recency on chat history and preview
+      if (step.timestamp) {
+        const stepTime = new Date(step.timestamp).getTime()
+        if (!isNaN(stepTime) && stepTime < cutoffTime) {
+          return false
+        }
+      }
+
       const stepProject = step.project_name || 'PulseBridge'
 
       if (selectedProject !== 'all' && stepProject.toLowerCase() !== selectedProject.toLowerCase()) {
@@ -235,7 +407,7 @@ export function ChatStream({
 
       return true
     })
-  }, [steps, selectedProject, selectedConversation, searchQuery])
+  }, [steps, selectedProject, selectedConversation, searchQuery, timeFilterDays])
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -544,18 +716,54 @@ export function ChatStream({
                   </div>
                 </div>
 
-                {!isSplitView && (
-                  <button
-                    onClick={() => {
-                      hapticLight()
-                      setIsSidePanelOpen(false)
-                    }}
-                    className="p-1 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white shrink-0 active:scale-95"
-                    title="Close Side Panel"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                )}
+                <div className="flex items-center gap-1.5">
+                  {/* Recency Time Filter Toggle (7d vs 30d per user request) */}
+                  <div className="flex bg-[#060a08] border border-emerald-950 p-0.5 rounded-lg text-[9px] font-mono font-bold">
+                    <button
+                      onClick={() => {
+                        hapticLight()
+                        setTimeFilterDays(7)
+                        onRefreshProjects?.(7)
+                      }}
+                      className={`px-1.5 py-0.5 rounded transition-all ${
+                        timeFilterDays === 7
+                          ? 'bg-amber-500 text-black shadow-sm'
+                          : 'text-gray-400 hover:text-emerald-300'
+                      }`}
+                      title="Show last 7 days only"
+                    >
+                      7d
+                    </button>
+                    <button
+                      onClick={() => {
+                        hapticLight()
+                        setTimeFilterDays(30)
+                        onRefreshProjects?.(30)
+                      }}
+                      className={`px-1.5 py-0.5 rounded transition-all ${
+                        timeFilterDays === 30
+                          ? 'bg-amber-500 text-black shadow-sm'
+                          : 'text-gray-400 hover:text-emerald-300'
+                      }`}
+                      title="Show last 30 days"
+                    >
+                      30d
+                    </button>
+                  </div>
+
+                  {!isSplitView && (
+                    <button
+                      onClick={() => {
+                        hapticLight()
+                        setIsSidePanelOpen(false)
+                      }}
+                      className="p-1 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white shrink-0 active:scale-95 ml-0.5"
+                      title="Close Side Panel"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
               </div>
 
               {/* Side Panel Internal Search */}
@@ -628,10 +836,10 @@ export function ChatStream({
                     return (
                       <div
                         key={group.projectName}
-                        className="rounded-xl bg-[#090f0c] border border-emerald-950/90 overflow-hidden shadow-sm"
+                        className="rounded-xl bg-[#090f0c] border border-emerald-950/90 overflow-hidden shadow-sm space-y-1"
                       >
                         {/* Project Header Banner */}
-                        <div className="p-2 bg-[#0d1611] border-b border-emerald-950/80 flex items-center justify-between gap-1">
+                        <div className="p-2 bg-[#0d1611] border-b border-emerald-950/80 flex items-center justify-between gap-1.5">
                           <button
                             onClick={() => selectProjectAndChat(group.projectName, 'all')}
                             className="flex items-center gap-1.5 text-left min-w-0 flex-1 hover:opacity-90"
@@ -640,81 +848,149 @@ export function ChatStream({
                             <span className="font-bold text-xs text-amber-100 truncate">
                               {group.projectName}
                             </span>
-                            <span className="text-[9px] uppercase px-1 py-0.2 rounded bg-black/60 border border-emerald-900 text-emerald-400 font-mono shrink-0">
+                            <span
+                              className={`text-[8.5px] uppercase px-1 py-0.2 rounded font-mono font-bold shrink-0 border ${
+                                group.ide.toLowerCase() === 'cursor'
+                                  ? 'bg-amber-950/80 border-amber-600/70 text-amber-300'
+                                  : group.ide.toLowerCase() === 'vscode'
+                                  ? 'bg-sky-950/80 border-sky-600/70 text-sky-300'
+                                  : 'bg-emerald-950/80 border-emerald-600/70 text-emerald-300'
+                              }`}
+                            >
                               {group.ide}
                             </span>
                           </button>
 
+                          {/* + New Chat in this Project */}
                           <button
-                            onClick={() => selectProjectAndChat(group.projectName, 'all')}
-                            className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-950/80 hover:bg-amber-950 text-emerald-300 border border-emerald-900/60 font-mono shrink-0 active:scale-95"
-                            title="View all chats for this project"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              handleStartNewChat(group.projectName)
+                            }}
+                            className="text-[9.5px] px-2 py-0.5 rounded-lg bg-gradient-to-r from-amber-500 to-yellow-500 text-black font-bold flex items-center gap-1 shrink-0 active:scale-95 shadow-sm transition-all"
+                            title={`Start new conversation in ${group.projectName}`}
                           >
-                            All ({group.totalSteps})
+                            <Plus className="w-3 h-3 text-black stroke-[3]" />
+                            <span>New</span>
                           </button>
                         </div>
 
-                        {/* Conversations under this Project */}
-                        <div className="p-1 space-y-1">
-                          {group.conversations.map((conv) => {
-                            const isConvActive =
-                              isGroupActive && selectedConversation === conv.id
+                        {/* Project Path Tag & Sub-tabs: Chats vs Structure */}
+                        <div className="px-2 pt-1 flex items-center justify-between gap-1">
+                          {group.projectPath ? (
+                            <span className="text-[9px] font-mono text-emerald-500/80 truncate max-w-[170px]" title={group.projectPath}>
+                              📁 {group.projectPath}
+                            </span>
+                          ) : (
+                            <span className="text-[9px] font-mono text-gray-500 italic">
+                              Live Workspace
+                            </span>
+                          )}
 
-                            return (
-                              <button
-                                key={conv.id}
-                                onClick={() =>
-                                  selectProjectAndChat(group.projectName, conv.id)
-                                }
-                                className={`w-full text-left p-2 rounded-lg border transition-all text-xs group active:scale-[0.98] ${
-                                  isConvActive
-                                    ? 'bg-amber-950/70 border-amber-400 shadow-md ring-1 ring-amber-400/40 text-amber-100'
-                                    : 'bg-[#060a08] border-emerald-950/60 hover:border-amber-500/40 text-gray-300 hover:bg-[#0c140f]'
-                                }`}
-                              >
-                                <div className="flex items-center justify-between gap-1 mb-1">
-                                  <div className="flex items-center gap-1.5 min-w-0">
-                                    <MessageSquare
-                                      className={`w-3 h-3 shrink-0 ${
-                                        isConvActive ? 'text-amber-400' : 'text-emerald-500/70'
-                                      }`}
-                                    />
-                                    <span className="font-semibold text-[11px] truncate leading-tight">
-                                      {conv.conversation_title}
-                                    </span>
-                                  </div>
-                                  <span className="text-[9px] font-mono text-emerald-400/80 shrink-0">
-                                    {conv.step_count} ev
-                                  </span>
-                                </div>
-
-                                {conv.latest_message_snippet && (
-                                  <div className="text-[9.5px] font-mono text-gray-400 truncate opacity-75 pl-4">
-                                    "{conv.latest_message_snippet}"
-                                  </div>
-                                )}
-
-                                <div className="flex items-center justify-between text-[8.5px] text-emerald-600/70 font-mono pt-1 pl-4">
-                                  <span className="flex items-center gap-1">
-                                    <Clock className="w-2.5 h-2.5" />
-                                    {conv.last_updated
-                                      ? new Date(conv.last_updated).toLocaleTimeString([], {
-                                          hour: '2-digit',
-                                          minute: '2-digit',
-                                        })
-                                      : 'Live'}
-                                  </span>
-                                  {isConvActive && (
-                                    <span className="flex items-center gap-1 text-amber-400 font-bold">
-                                      <CheckCircle2 className="w-2.5 h-2.5" />
-                                      Active
-                                    </span>
-                                  )}
-                                </div>
-                              </button>
-                            )
-                          })}
+                          <div className="flex items-center gap-1 shrink-0 bg-[#060a08] p-0.5 rounded-lg border border-emerald-950">
+                            <button
+                              onClick={() => handleToggleStructureTab(group, 'chats')}
+                              className={`px-1.5 py-0.5 text-[8.5px] font-mono font-bold rounded transition-all ${
+                                (projectTabs[group.projectName] || 'chats') === 'chats'
+                                  ? 'bg-amber-950 text-amber-300 border border-amber-500/40'
+                                  : 'text-gray-400 hover:text-emerald-300'
+                              }`}
+                            >
+                              Chats ({group.conversations.length})
+                            </button>
+                            <button
+                              onClick={() => handleToggleStructureTab(group, 'structure')}
+                              className={`px-1.5 py-0.5 text-[8.5px] font-mono font-bold rounded transition-all ${
+                                projectTabs[group.projectName] === 'structure'
+                                  ? 'bg-amber-950 text-amber-300 border border-amber-500/40'
+                                  : 'text-gray-400 hover:text-emerald-300'
+                              }`}
+                            >
+                              Files
+                            </button>
+                          </div>
                         </div>
+
+                        {/* Content Area: Either Folder Structure or Conversation List */}
+                        {projectTabs[group.projectName] === 'structure' ? (
+                          <div className="p-2 border-t border-emerald-950/60 bg-[#060907] max-h-48 overflow-y-auto">
+                            {structureLoading[group.projectName] ? (
+                              <div className="flex items-center justify-center gap-1.5 py-4 text-xs font-mono text-amber-400">
+                                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                <span>Scanning folder structure...</span>
+                              </div>
+                            ) : (
+                              <FileTreeView
+                                entries={structureData[group.projectName] || []}
+                                expandedFolders={expandedFolders}
+                                onToggleFolder={toggleFolder}
+                              />
+                            )}
+                          </div>
+                        ) : (
+                          <div className="p-1 space-y-1">
+                            {group.conversations.slice(0, 6).map((conv) => {
+                              const isConvActive = isGroupActive && selectedConversation === conv.id
+                              const isLoadingThis = loadingConvId === conv.id
+
+                              return (
+                                <button
+                                  key={conv.id}
+                                  onClick={() => handleSelectConversation(group.projectName, conv.id)}
+                                  className={`w-full text-left p-2 rounded-lg border transition-all text-xs group active:scale-[0.98] ${
+                                    isConvActive
+                                      ? 'bg-amber-950/70 border-amber-400 shadow-md ring-1 ring-amber-400/40 text-amber-100'
+                                      : 'bg-[#060a08] border-emerald-950/60 hover:border-amber-500/40 text-gray-300 hover:bg-[#0c140f]'
+                                  }`}
+                                >
+                                  <div className="flex items-center justify-between gap-1 mb-1">
+                                    <div className="flex items-center gap-1.5 min-w-0">
+                                      {isLoadingThis ? (
+                                        <RefreshCw className="w-3 h-3 text-amber-400 animate-spin shrink-0" />
+                                      ) : (
+                                        <MessageSquare
+                                          className={`w-3 h-3 shrink-0 ${
+                                            isConvActive ? 'text-amber-400' : 'text-emerald-500/70'
+                                          }`}
+                                        />
+                                      )}
+                                      <span className="font-semibold text-[11px] truncate leading-tight">
+                                        {conv.conversation_title}
+                                      </span>
+                                    </div>
+                                    <span className="text-[9px] font-mono text-emerald-400/80 shrink-0">
+                                      {conv.step_count} ev
+                                    </span>
+                                  </div>
+
+                                  {conv.latest_message_snippet && (
+                                    <div className="text-[9.5px] font-mono text-gray-400 truncate opacity-75 pl-4">
+                                      "{conv.latest_message_snippet}"
+                                    </div>
+                                  )}
+
+                                  <div className="flex items-center justify-between text-[8.5px] text-emerald-600/70 font-mono pt-1 pl-4">
+                                    <span className="flex items-center gap-1">
+                                      <Clock className="w-2.5 h-2.5" />
+                                      {conv.last_updated
+                                        ? new Date(conv.last_updated).toLocaleTimeString([], {
+                                            hour: '2-digit',
+                                            minute: '2-digit',
+                                          })
+                                        : 'Live'}
+                                    </span>
+                                    {isConvActive && (
+                                      <span className="flex items-center gap-1 text-amber-400 font-bold">
+                                        <CheckCircle2 className="w-2.5 h-2.5" />
+                                        Active
+                                      </span>
+                                    )}
+                                  </div>
+                                </button>
+                              )
+                            })}
+                          </div>
+                        )}
                       </div>
                     )
                   })}

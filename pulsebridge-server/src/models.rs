@@ -78,6 +78,25 @@ pub struct ProjectChatInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_message_snippet: Option<String>,
     pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectFileEntry {
+    pub name: String,
+    pub relative_path: String,
+    pub is_dir: bool,
+    pub size: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub children: Option<Vec<ProjectFileEntry>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectStructureResponse {
+    pub project_name: String,
+    pub root_path: String,
+    pub entries: Vec<ProjectFileEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

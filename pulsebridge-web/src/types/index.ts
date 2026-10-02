@@ -35,6 +35,21 @@ export interface ProjectChatInfo {
   step_count: number
   latest_message_snippet?: string
   status: string
+  project_path?: string
+}
+
+export interface ProjectFileEntry {
+  name: string
+  relative_path: string
+  is_dir: boolean
+  size: number
+  children?: ProjectFileEntry[]
+}
+
+export interface ProjectStructureResponse {
+  project_name: string
+  root_path: string
+  entries: ProjectFileEntry[]
 }
 
 export interface TaskMilestone {

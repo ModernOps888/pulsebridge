@@ -14,10 +14,6 @@ import {
   Hand,
   Send,
   Zap,
-  ArrowUp,
-  ArrowDown,
-  ArrowLeft,
-  ArrowRight,
   ChevronUp,
   ChevronDown,
   ChevronLeft,
@@ -26,7 +22,6 @@ import {
   ChevronsDown,
   Compass,
   Crosshair,
-  Move,
 } from 'lucide-react'
 import type { IdeWindowInfo } from '../types'
 
@@ -64,11 +59,11 @@ export function IdePreview({
   const [theaterMode, setTheaterMode] = useState<boolean>(false)
   // Mini-map radar overlay visibility
   const [showMinimap, setShowMinimap] = useState<boolean>(true)
-  // Directional D-pad visibility toggle
-  const [showDpad, setShowDpad] = useState<boolean>(false)
 
-  // Touch-to-click ripple
+  // Touch-to-click ripple & touch-drag remote scroll indicator
   const [clickIndicator, setClickIndicator] = useState<{ x: number; y: number } | null>(null)
+  const [scrollIndicator, setScrollIndicator] = useState<{ dir: 'up' | 'down' } | null>(null)
+  const scrollIndicatorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [quickTypeText, setQuickTypeText] = useState('')
 
   // Viewport scroll metrics for high-contrast on-screen scrollbars & radar
@@ -93,23 +88,31 @@ export function IdePreview({
   const vTrackRef = useRef<HTMLDivElement | null>(null)
   const minimapRef = useRef<HTMLDivElement | null>(null)
 
-  // Smart gesture tracking: differentiates between a quick tap (click) and swipe (pan)
+  // Smart gesture tracking: differentiates between a quick tap (click) and touch drag/swipe (remote wheel scroll / pan)
   const pointerStateRef = useRef<{
     isDown: boolean
     startX: number
     startY: number
+    lastX: number
+    lastY: number
     startScrollLeft: number
     startScrollTop: number
     startTime: number
     hasMoved: boolean
+    accumulatedDeltaY: number
+    lastScrollTime: number
   }>({
     isDown: false,
     startX: 0,
     startY: 0,
+    lastX: 0,
+    lastY: 0,
     startScrollLeft: 0,
     startScrollTop: 0,
     startTime: 0,
     hasMoved: false,
+    accumulatedDeltaY: 0,
+    lastScrollTime: 0,
   })
 
   const fetchSnapshot = useCallback(() => {
@@ -282,10 +285,14 @@ export function IdePreview({
       isDown: true,
       startX: e.clientX,
       startY: e.clientY,
+      lastX: e.clientX,
+      lastY: e.clientY,
       startScrollLeft: viewportRef.current.scrollLeft,
       startScrollTop: viewportRef.current.scrollTop,
       startTime: Date.now(),
       hasMoved: false,
+      accumulatedDeltaY: 0,
+      lastScrollTime: 0,
     }
     try {
       e.currentTarget.setPointerCapture(e.pointerId)
@@ -294,15 +301,57 @@ export function IdePreview({
 
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!pointerStateRef.current.isDown || !viewportRef.current) return
-    const dx = e.clientX - pointerStateRef.current.startX
-    const dy = e.clientY - pointerStateRef.current.startY
+    const state = pointerStateRef.current
+    const dx = e.clientX - state.startX
+    const dy = e.clientY - state.startY
+    const stepDy = e.clientY - state.lastY
+    state.lastX = e.clientX
+    state.lastY = e.clientY
 
-    // If movement exceeds 6px threshold or user is in pan mode, execute smooth scroll
-    if (Math.hypot(dx, dy) > 6 || interactionMode === 'pan') {
-      pointerStateRef.current.hasMoved = true
-      viewportRef.current.scrollLeft = pointerStateRef.current.startScrollLeft - dx
-      viewportRef.current.scrollTop = pointerStateRef.current.startScrollTop - dy
-      updateScrollMetrics()
+    // In pan mode: pan local zoomed canvas
+    if (interactionMode === 'pan') {
+      if (Math.hypot(dx, dy) > 6) {
+        state.hasMoved = true
+        viewportRef.current.scrollLeft = state.startScrollLeft - dx
+        viewportRef.current.scrollTop = state.startScrollTop - dy
+        updateScrollMetrics()
+      }
+      return
+    }
+
+    // In interactive/click mode: touch drag/swipe streams remote mouse wheel scroll
+    if (Math.hypot(dx, dy) > 8) {
+      state.hasMoved = true
+    }
+
+    if (state.hasMoved) {
+      state.accumulatedDeltaY += stepDy
+      const now = Date.now()
+      const threshold = 22 // 22px touch travel per scroll event
+
+      if (Math.abs(state.accumulatedDeltaY) >= threshold && now - state.lastScrollTime > 50) {
+        let xRatio: number | undefined
+        let yRatio: number | undefined
+        if (imgRef.current) {
+          const rect = imgRef.current.getBoundingClientRect()
+          if (rect.width > 0 && rect.height > 0) {
+            xRatio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+            yRatio = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height))
+          }
+        }
+
+        // Swiping UP (finger moves negative Y) => scroll DOWN (-120)
+        // Swiping DOWN (finger moves positive Y) => scroll UP (120)
+        const scrollDelta = state.accumulatedDeltaY < 0 ? -120 : 120
+        triggerRemoteScroll(scrollDelta, xRatio, yRatio)
+
+        setScrollIndicator({ dir: scrollDelta > 0 ? 'up' : 'down' })
+        if (scrollIndicatorTimerRef.current) clearTimeout(scrollIndicatorTimerRef.current)
+        scrollIndicatorTimerRef.current = setTimeout(() => setScrollIndicator(null), 500)
+
+        state.accumulatedDeltaY = 0
+        state.lastScrollTime = now
+      }
     }
   }
 
@@ -315,9 +364,12 @@ export function IdePreview({
       e.currentTarget.releasePointerCapture(e.pointerId)
     } catch (_) {}
 
-    // Tap detection: short duration & minimal travel registers as a click
-    if (!hasMoved && Date.now() - startTime < 450 && interactionMode === 'click') {
+    // Tap detection: short duration (< 350ms) & minimal movement registers as a click
+    if (!hasMoved && Date.now() - startTime < 350 && interactionMode === 'click') {
       executeRemoteClick(e.clientX, e.clientY)
+    } else if (hasMoved) {
+      // Swiping/scrolling finished: refresh frame snapshot
+      setTimeout(fetchSnapshot, 200)
     }
   }
 
@@ -394,23 +446,11 @@ export function IdePreview({
     window.addEventListener('pointerup', onPointerUp)
   }
 
-  // Directional Nudge pan (scrolls zoomed view by 160px)
-  const nudgeScroll = (dirX: number, dirY: number) => {
-    if (viewportRef.current) {
-      viewportRef.current.scrollBy({
-        left: dirX * 160,
-        top: dirY * 160,
-        behavior: 'smooth',
-      })
-      setTimeout(updateScrollMetrics, 100)
-    }
-  }
-
   // Remote IDE Scroll Trigger (Win32 simulate_scroll)
-  const triggerRemoteScroll = async (deltaBase: number) => {
+  const triggerRemoteScroll = async (deltaBase: number, xRatio?: number, yRatio?: number) => {
     const delta = deltaBase * scrollSpeedMultiplier
     if (onScroll) {
-      onScroll(delta, undefined, undefined, selectedWindowId)
+      onScroll(delta, xRatio, yRatio, selectedWindowId)
     } else {
       try {
         await fetch('/api/action/scroll', {
@@ -422,6 +462,8 @@ export function IdePreview({
           body: JSON.stringify({
             delta,
             window_id: selectedWindowId,
+            x_ratio: xRatio,
+            y_ratio: yRatio,
           }),
         })
       } catch (err) {
@@ -704,6 +746,14 @@ export function IdePreview({
                     style={{ left: `${clickIndicator.x}px`, top: `${clickIndicator.y}px` }}
                   />
                 )}
+
+                {/* Tactile Touch Drag / Wheel Scroll Badge */}
+                {scrollIndicator && (
+                  <div className="absolute top-4 right-4 z-30 pointer-events-none bg-amber-500 text-black text-[11px] font-mono font-bold px-3 py-1.5 rounded-full shadow-2xl flex items-center gap-1.5 animate-fadeIn border border-white/40">
+                    {scrollIndicator.dir === 'up' ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                    <span>{scrollIndicator.dir === 'up' ? 'Scroll ▲' : 'Scroll ▼'}</span>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -857,20 +907,6 @@ export function IdePreview({
             <Maximize2 className="w-3.5 h-3.5" />
           </button>
 
-          {/* D-Pad Toggle */}
-          {zoomLevel > 1 && (
-            <button
-              onClick={() => setShowDpad(!showDpad)}
-              className={`p-1.5 rounded-lg border transition-all ${
-                showDpad
-                  ? 'bg-amber-950 border-amber-500 text-amber-300'
-                  : 'bg-[#0d140f] border-emerald-950 text-emerald-500 hover:text-emerald-300'
-              }`}
-              title="Toggle Pan D-Pad"
-            >
-              <Move className="w-3.5 h-3.5" />
-            </button>
-          )}
         </div>
 
         {/* Picture-in-Picture Mini-Map Spatial Radar */}
@@ -927,64 +963,6 @@ export function IdePreview({
             <Crosshair className="w-3 h-3 text-amber-400" />
             <span>Radar</span>
           </button>
-        )}
-
-        {/* Directional Nudge D-Pad (Optional Overlay) */}
-        {zoomLevel > 1 && showDpad && (
-          <div className="absolute top-3 right-3 bg-[#060907]/95 backdrop-blur-md p-1.5 rounded-xl border border-amber-500/50 shadow-xl z-30 flex flex-col items-center gap-1">
-            <div className="flex items-center justify-between w-full px-1">
-              <span className="text-[8px] font-mono font-bold text-amber-400 uppercase">Pan D-Pad</span>
-              <button
-                onClick={() => setShowDpad(false)}
-                className="text-[8px] text-gray-400 hover:text-white"
-              >
-                ✕
-              </button>
-            </div>
-            <div className="grid grid-cols-3 gap-1">
-              <div />
-              <button
-                onClick={() => nudgeScroll(0, -1)}
-                className="p-1 rounded bg-[#0d140f] hover:bg-amber-950 text-amber-300 flex items-center justify-center"
-                title="Scroll Up"
-              >
-                <ArrowUp className="w-3 h-3" />
-              </button>
-              <div />
-
-              <button
-                onClick={() => nudgeScroll(-1, 0)}
-                className="p-1 rounded bg-[#0d140f] hover:bg-amber-950 text-amber-300 flex items-center justify-center"
-                title="Scroll Left"
-              >
-                <ArrowLeft className="w-3 h-3" />
-              </button>
-              <button
-                onClick={jumpToCenter}
-                className="p-1 rounded bg-[#0d140f] hover:bg-amber-950 text-amber-400 flex items-center justify-center"
-                title="Center View"
-              >
-                <Compass className="w-3 h-3" />
-              </button>
-              <button
-                onClick={() => nudgeScroll(1, 0)}
-                className="p-1 rounded bg-[#0d140f] hover:bg-amber-950 text-amber-300 flex items-center justify-center"
-                title="Scroll Right"
-              >
-                <ArrowRight className="w-3 h-3" />
-              </button>
-
-              <div />
-              <button
-                onClick={() => nudgeScroll(0, 1)}
-                className="p-1 rounded bg-[#0d140f] hover:bg-amber-950 text-amber-300 flex items-center justify-center"
-                title="Scroll Down"
-              >
-                <ArrowDown className="w-3 h-3" />
-              </button>
-              <div />
-            </div>
-          </div>
         )}
 
         {selectedWindow && !showMinimap && (

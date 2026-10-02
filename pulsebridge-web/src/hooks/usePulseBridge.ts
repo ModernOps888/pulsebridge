@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import type { ChatStep, IdeWindowInfo, ProjectChatInfo, ServerAlert, SystemTelemetry, TaskProgress } from '../types'
-import { pulseAudio } from '../utils/audio'
+import type { ChatStep, IdeWindowInfo, ProjectChatInfo, ProjectStructureResponse, ServerAlert, SystemTelemetry, TaskProgress } from '../types'
 
 export function usePulseBridge() {
   const [token, setToken] = useState<string | null>(() => {
@@ -18,7 +17,7 @@ export function usePulseBridge() {
   const [isConnected, setIsConnected] = useState<boolean>(false)
   const [authError, setAuthError] = useState<string | null>(null)
   const [latencyMs, setLatencyMs] = useState<number | null>(null)
-  const [isSoundEnabled, setIsSoundEnabled] = useState<boolean>(() => pulseAudio.isSoundEnabled())
+  const [isSoundEnabled, setIsSoundEnabled] = useState<boolean>(false)
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>(() => {
     if (typeof window !== 'undefined' && 'Notification' in window) {
       return Notification.permission
@@ -39,9 +38,8 @@ export function usePulseBridge() {
   const connectedTokenRef = useRef<string | null>(null)
 
   const toggleSound = () => {
-    const next = pulseAudio.toggleSound()
-    setIsSoundEnabled(next)
-    return next
+    setIsSoundEnabled(false)
+    return false
   }
 
   const requestNotificationPermission = async (): Promise<boolean> => {
@@ -179,7 +177,6 @@ export function usePulseBridge() {
             })
             triggerHaptic(30)
             if (msg.payload?.source !== 'USER') {
-              pulseAudio.playChime('milestone')
               sendBackgroundNotification(
                 'PulseBridge: AI Milestone Reached ⚡',
                 msg.payload?.content?.slice(0, 100) || 'Task step finished'
@@ -202,7 +199,6 @@ export function usePulseBridge() {
           case 'alert':
             setAlerts((prev) => [msg.payload, ...prev.slice(0, 9)])
             triggerHaptic([50, 80, 50])
-            pulseAudio.playChime('action_required')
             sendBackgroundNotification(
               `PulseBridge: ${msg.payload.title || 'Attention Required'} ⚠️`,
               msg.payload.message || 'The AI agent requires your action'
@@ -294,7 +290,6 @@ export function usePulseBridge() {
       ide: task?.active_ide || 'antigravity',
     }
     setChatSteps((prev) => [...prev, userStep])
-    pulseAudio.playChime('prompt_sent')
 
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       // Fallback to REST
@@ -492,10 +487,11 @@ export function usePulseBridge() {
     }
   }, [isAuthenticated])
 
-  const refreshProjects = useCallback(async () => {
-    if (!token) return
+  const refreshProjects = useCallback(async (days = 30) => {
+    if (!token && !localStorage.getItem('pulsebridge_token')) return
+    const authToken = token || localStorage.getItem('pulsebridge_token')
     try {
-      const res = await fetch(`/api/chat/projects?token=${token}`)
+      const res = await fetch(`/api/chat/projects?days=${days}&token=${encodeURIComponent(authToken || '')}`)
       if (res.ok) {
         const data = await res.json()
         if (Array.isArray(data)) {
@@ -503,6 +499,38 @@ export function usePulseBridge() {
         }
       }
     } catch (_) {}
+  }, [token])
+
+  // On-demand loader for historical conversation steps
+  const loadConversationHistory = useCallback(async (convId: string, days = 30): Promise<ChatStep[]> => {
+    const authToken = token || localStorage.getItem('pulsebridge_token')
+    try {
+      const res = await fetch(`/api/chat?conversation_id=${encodeURIComponent(convId)}&days=${days}&token=${encodeURIComponent(authToken || '')}`)
+      if (res.ok) {
+        const steps = await res.json()
+        if (Array.isArray(steps) && steps.length > 0) {
+          setChatSteps(steps)
+          return steps
+        }
+      }
+    } catch (err) {
+      console.error('Failed to load historical conversation', err)
+    }
+    return []
+  }, [token])
+
+  // Live project folder structure loader
+  const fetchProjectStructure = useCallback(async (projectOrPath: string): Promise<ProjectStructureResponse | null> => {
+    const authToken = token || localStorage.getItem('pulsebridge_token')
+    try {
+      const res = await fetch(`/api/project/structure?project=${encodeURIComponent(projectOrPath)}&token=${encodeURIComponent(authToken || '')}`)
+      if (res.ok) {
+        return await res.json()
+      }
+    } catch (err) {
+      console.error('Failed to fetch project folder structure', err)
+    }
+    return null
   }, [token])
 
   return {
@@ -514,6 +542,8 @@ export function usePulseBridge() {
     chatSteps,
     projects,
     refreshProjects,
+    loadConversationHistory,
+    fetchProjectStructure,
     telemetry,
     windows,
     latestFrame,
