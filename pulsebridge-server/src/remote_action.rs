@@ -177,6 +177,9 @@ impl RemoteActionDispatcher {
             thinking: None,
             tool_calls: None,
             ide: ide.clone(),
+            project_name: None,
+            conversation_id: None,
+            conversation_title: None,
         };
         state.add_chat_step(step);
 

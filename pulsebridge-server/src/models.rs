@@ -59,6 +59,25 @@ pub struct ChatStep {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallInfo>>,
     pub ide: IdeSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_title: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectChatInfo {
+    pub id: String,
+    pub project_name: String,
+    pub conversation_title: String,
+    pub ide: IdeSource,
+    pub last_updated: String,
+    pub step_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_message_snippet: Option<String>,
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,7 +153,11 @@ pub enum WsServerMessage {
         recent_steps: Vec<ChatStep>,
         telemetry: SystemTelemetry,
         windows: Vec<IdeWindowInfo>,
+        #[serde(default)]
+        projects: Vec<ProjectChatInfo>,
     },
+    #[serde(rename = "projects_update")]
+    ProjectsUpdate(Vec<ProjectChatInfo>),
     #[serde(rename = "step_added")]
     StepAdded(ChatStep),
     #[serde(rename = "progress_update")]

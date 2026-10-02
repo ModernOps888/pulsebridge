@@ -95,6 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/auth/qr", get(api::qr_code_handler))
         .route("/api/status", get(api::status_handler))
         .route("/api/chat", get(api::chat_steps_handler))
+        .route("/api/chat/projects", get(api::list_projects_handler))
         .route("/api/ide/windows", get(api::list_windows_handler))
         .route("/api/preview/frame", get(api::preview_frame_handler))
         .route("/api/ingest/event", post(ingest::handle_ingest_event))

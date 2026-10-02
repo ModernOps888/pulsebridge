@@ -24,12 +24,16 @@ pub struct IngestEventPayload {
     pub task_title: Option<String>,
     pub percent_complete: Option<u8>,
     pub status: Option<String>,
+    pub project_name: Option<String>,
+    pub conversation_id: Option<String>,
+    pub conversation_title: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct SendPromptPayload {
     pub message: String,
     pub target_ide: Option<String>,
+    pub target_project: Option<String>,
 }
 
 pub async fn handle_ingest_event(
@@ -90,6 +94,9 @@ pub async fn handle_ingest_event(
         thinking: payload.thinking,
         tool_calls,
         ide: ide_source,
+        project_name: payload.project_name,
+        conversation_id: payload.conversation_id,
+        conversation_title: payload.conversation_title,
     };
 
     state.add_chat_step(step);

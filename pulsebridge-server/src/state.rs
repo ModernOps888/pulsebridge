@@ -6,7 +6,10 @@ use parking_lot::RwLock;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 use crate::auth::AuthManager;
-use crate::models::{AgentStatus, ChatStep, IdeSource, SystemTelemetry, TaskMilestone, TaskProgress, WsServerMessage};
+use crate::models::{
+    AgentStatus, ChatStep, IdeSource, ProjectChatInfo, SystemTelemetry, TaskMilestone, TaskProgress,
+    WsServerMessage,
+};
 use crate::system_telemetry::TelemetryCollector;
 
 #[derive(Clone)]
@@ -19,6 +22,7 @@ struct StateInner {
     telemetry: TelemetryCollector,
     task_progress: RwLock<TaskProgress>,
     recent_steps: RwLock<VecDeque<ChatStep>>,
+    projects: RwLock<std::collections::HashMap<String, ProjectChatInfo>>,
     task_start_time: Instant,
     broadcast_tx: broadcast::Sender<WsServerMessage>,
     allow_shell_commands: bool,
@@ -57,12 +61,25 @@ impl SharedState {
             ],
         };
 
+        let mut initial_projects = std::collections::HashMap::new();
+        initial_projects.insert("pulsebridge".to_string(), ProjectChatInfo {
+            id: "pulsebridge".to_string(),
+            project_name: "PulseBridge".to_string(),
+            conversation_title: "Universal AI IDE Companion".to_string(),
+            ide: IdeSource::Antigravity,
+            last_updated: Local::now().to_rfc3339(),
+            step_count: 0,
+            latest_message_snippet: Some("Monitoring workstation and IDE stream".to_string()),
+            status: "active".to_string(),
+        });
+
         Self {
             inner: Arc::new(StateInner {
                 auth,
                 telemetry,
                 task_progress: RwLock::new(initial_progress),
-                recent_steps: RwLock::new(VecDeque::with_capacity(250)),
+                recent_steps: RwLock::new(VecDeque::with_capacity(500)),
+                projects: RwLock::new(initial_projects),
                 task_start_time: Instant::now(),
                 broadcast_tx,
                 allow_shell_commands,
@@ -97,11 +114,53 @@ impl SharedState {
             if steps.iter().any(|s| s.id == step.id) {
                 return;
             }
-            if steps.len() >= 250 {
+            if steps.len() >= 500 {
                 steps.pop_front();
             }
             steps.push_back(step.clone());
         }
+
+        // Dynamically track and update multi-project chat catalogue
+        let proj_key = step.conversation_id.clone()
+            .or_else(|| step.project_name.clone().map(|p| p.to_lowercase()))
+            .unwrap_or_else(|| format!("{:?}", step.ide).to_lowercase());
+        let proj_name = step.project_name.clone().unwrap_or_else(|| "Default Project".to_string());
+        let conv_title = step.conversation_title.clone().unwrap_or_else(|| "Active Session".to_string());
+        let snippet = step.content.as_deref().or(step.thinking.as_deref()).map(|s| {
+            let t = s.trim();
+            if t.chars().count() > 120 {
+                let trunc: String = t.chars().take(117).collect();
+                format!("{trunc}...")
+            } else {
+                t.to_string()
+            }
+        });
+
+        {
+            let mut pmap = self.inner.projects.write();
+            let entry = pmap.entry(proj_key).or_insert_with(|| ProjectChatInfo {
+                id: step.conversation_id.clone().unwrap_or_else(|| proj_name.to_lowercase()),
+                project_name: proj_name.clone(),
+                conversation_title: conv_title.clone(),
+                ide: step.ide.clone(),
+                last_updated: step.timestamp.clone(),
+                step_count: 0,
+                latest_message_snippet: None,
+                status: "active".to_string(),
+            });
+            entry.step_count += 1;
+            entry.last_updated = step.timestamp.clone();
+            if let Some(snip) = snippet {
+                entry.latest_message_snippet = Some(snip);
+            }
+            entry.project_name = proj_name;
+            entry.conversation_title = conv_title;
+            entry.ide = step.ide.clone();
+            entry.status = "active".to_string();
+        }
+
+        // Broadcast projects update
+        self.broadcast(WsServerMessage::ProjectsUpdate(self.get_project_chats()));
 
         // Dynamically adjust task status & telemetry based on step
         let step_desc = if let Some(ref calls) = step.tool_calls {
@@ -137,7 +196,7 @@ impl SharedState {
             p.active_ide = step.ide.clone();
         });
 
-        // Broadcast to all phone clients
+        // Broadcast step to all connected clients
         self.broadcast(WsServerMessage::StepAdded(step));
     }
 
@@ -163,6 +222,45 @@ impl SharedState {
 
     pub fn get_recent_steps(&self) -> Vec<ChatStep> {
         self.inner.recent_steps.read().iter().cloned().collect()
+    }
+
+    pub fn get_recent_steps_filtered(&self, project: Option<&str>, conv_id: Option<&str>) -> Vec<ChatStep> {
+        let steps = self.inner.recent_steps.read();
+        steps.iter().filter(|s| {
+            if let Some(p) = project {
+                if let Some(ref sp) = s.project_name {
+                    if !sp.eq_ignore_ascii_case(p) {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+            }
+            if let Some(cid) = conv_id {
+                if let Some(ref scid) = s.conversation_id {
+                    if scid != cid {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+            }
+            true
+        }).cloned().collect()
+    }
+
+    pub fn get_project_chats(&self) -> Vec<ProjectChatInfo> {
+        let mut list: Vec<ProjectChatInfo> = self.inner.projects.read().values().cloned().collect();
+        list.sort_by(|a, b| b.last_updated.cmp(&a.last_updated));
+        list
+    }
+
+    pub fn update_project_info(&self, info: ProjectChatInfo) {
+        {
+            let mut p = self.inner.projects.write();
+            p.insert(info.id.clone(), info);
+        }
+        self.broadcast(WsServerMessage::ProjectsUpdate(self.get_project_chats()));
     }
 
     pub fn get_telemetry(&self) -> SystemTelemetry {

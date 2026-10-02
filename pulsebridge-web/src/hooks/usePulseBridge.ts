@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import type { ChatStep, IdeWindowInfo, ServerAlert, SystemTelemetry, TaskProgress } from '../types'
+import type { ChatStep, IdeWindowInfo, ProjectChatInfo, ServerAlert, SystemTelemetry, TaskProgress } from '../types'
 import { pulseAudio } from '../utils/audio'
 
 export function usePulseBridge() {
@@ -32,6 +32,7 @@ export function usePulseBridge() {
 
   const [task, setTask] = useState<TaskProgress | null>(null)
   const [chatSteps, setChatSteps] = useState<ChatStep[]>([])
+  const [projects, setProjects] = useState<ProjectChatInfo[]>([])
   const [telemetry, setTelemetry] = useState<SystemTelemetry | null>(null)
   const [windows, setWindows] = useState<IdeWindowInfo[]>([])
   const [latestFrame, setLatestFrame] = useState<string | null>(null)
@@ -131,8 +132,17 @@ export function usePulseBridge() {
             setIsAuthenticated(true)
             setTask(msg.payload.task)
             setChatSteps(msg.payload.recent_steps || [])
+            if (msg.payload.projects) {
+              setProjects(msg.payload.projects)
+            }
             setTelemetry(msg.payload.telemetry)
             setWindows(msg.payload.windows || [])
+            break
+
+          case 'projects_update':
+            if (Array.isArray(msg.payload)) {
+              setProjects(msg.payload)
+            }
             break
 
           case 'step_added':
@@ -421,6 +431,19 @@ export function usePulseBridge() {
     }
   }, [token, connectWebSocket])
 
+  const refreshProjects = useCallback(async () => {
+    if (!token) return
+    try {
+      const res = await fetch(`/api/chat/projects?token=${token}`)
+      if (res.ok) {
+        const data = await res.json()
+        if (Array.isArray(data)) {
+          setProjects(data)
+        }
+      }
+    } catch (_) {}
+  }, [token])
+
   return {
     isAuthenticated,
     isConnected,
@@ -428,6 +451,8 @@ export function usePulseBridge() {
     token,
     task,
     chatSteps,
+    projects,
+    refreshProjects,
     telemetry,
     windows,
     latestFrame,

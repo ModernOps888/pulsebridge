@@ -21,6 +21,20 @@ export interface ChatStep {
   thinking?: string
   tool_calls?: ToolCallInfo[]
   ide: IdeSource
+  project_name?: string
+  conversation_id?: string
+  conversation_title?: string
+}
+
+export interface ProjectChatInfo {
+  id: string
+  project_name: string
+  conversation_title: string
+  ide: IdeSource
+  last_updated: string
+  step_count: number
+  latest_message_snippet?: string
+  status: string
 }
 
 export interface TaskMilestone {

@@ -28,6 +28,8 @@ use std::net::SocketAddr;
 #[derive(Debug, Deserialize)]
 pub struct AuthHeaderQuery {
     pub token: Option<String>,
+    pub project: Option<String>,
+    pub conversation_id: Option<String>,
 }
 
 pub async fn login_handler(
@@ -116,7 +118,23 @@ pub async fn chat_steps_handler(
     Query(query): Query<AuthHeaderQuery>,
 ) -> Result<Json<Vec<ChatStep>>, StatusCode> {
     verify_auth(&state, &headers, query.token.as_deref())?;
-    Ok(Json(state.get_recent_steps()))
+    if query.project.is_some() || query.conversation_id.is_some() {
+        Ok(Json(state.get_recent_steps_filtered(
+            query.project.as_deref(),
+            query.conversation_id.as_deref(),
+        )))
+    } else {
+        Ok(Json(state.get_recent_steps()))
+    }
+}
+
+pub async fn list_projects_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(query): Query<AuthHeaderQuery>,
+) -> Result<Json<Vec<crate::models::ProjectChatInfo>>, StatusCode> {
+    verify_auth(&state, &headers, query.token.as_deref())?;
+    Ok(Json(state.get_project_chats()))
 }
 
 pub async fn list_windows_handler(

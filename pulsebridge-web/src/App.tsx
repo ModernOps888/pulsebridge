@@ -18,6 +18,8 @@ export function App() {
     token,
     task,
     chatSteps,
+    projects,
+    refreshProjects,
     telemetry,
     windows,
     latestFrame,
@@ -101,9 +103,16 @@ export function App() {
       </div>
 
       {/* Main Tab View */}
-      <main className={`flex-1 w-full mx-auto transition-all ${activeTab === 'preview' ? 'max-w-4xl px-2 sm:px-4' : 'max-w-lg'}`}>
+      <main className={`flex-1 w-full mx-auto transition-all ${activeTab === 'preview' || activeTab === 'chat' ? 'max-w-5xl px-2 sm:px-4' : 'max-w-lg'}`}>
         {activeTab === 'tracker' && <TaskTracker task={task} />}
-        {activeTab === 'chat' && <ChatStream steps={chatSteps} onSendPrompt={sendPrompt} />}
+        {activeTab === 'chat' && (
+          <ChatStream
+            steps={chatSteps}
+            projects={projects}
+            onSendPrompt={sendPrompt}
+            onRefreshProjects={refreshProjects}
+          />
+        )}
         {activeTab === 'commander' && (
           <RemoteControlDrawer
             token={token}

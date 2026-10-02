@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -5,15 +6,23 @@ use std::time::SystemTime;
 use chrono::Local;
 use serde_json::Value;
 use tracing::info;
-use crate::models::{ChatStep, IdeSource, TaskMilestone, ToolCallInfo};
+use crate::models::{ChatStep, IdeSource, ProjectChatInfo, TaskMilestone, ToolCallInfo};
 use crate::state::SharedState;
+
+struct TrackedConversation {
+    conv_id: String,
+    transcript_path: PathBuf,
+    last_file_position: u64,
+    last_step_index: u64,
+    last_modified: SystemTime,
+    project_name: String,
+    conversation_title: String,
+}
 
 pub struct AntigravityWatcher {
     base_brain_dir: PathBuf,
-    current_conv_id: Option<String>,
-    current_transcript_path: Option<PathBuf>,
-    last_file_position: u64,
-    last_step_index: u64,
+    tracked: HashMap<String, TrackedConversation>,
+    most_recent_conv_id: Option<String>,
 }
 
 impl AntigravityWatcher {
@@ -26,10 +35,8 @@ impl AntigravityWatcher {
 
         Self {
             base_brain_dir,
-            current_conv_id: None,
-            current_transcript_path: None,
-            last_file_position: 0,
-            last_step_index: 0,
+            tracked: HashMap::new(),
+            most_recent_conv_id: None,
         }
     }
 
@@ -38,37 +45,80 @@ impl AntigravityWatcher {
             return;
         }
 
-        // Find the latest active conversation folder
-        let active_conv = self.find_latest_conversation();
-        if let Some((conv_id, transcript_path)) = active_conv {
-            let is_new_conv = self.current_conv_id.as_deref() != Some(&conv_id);
-            if is_new_conv {
-                info!("AntigravityWatcher: Switched to conversation {}", conv_id);
-                self.current_conv_id = Some(conv_id.clone());
-                self.current_transcript_path = Some(transcript_path.clone());
-                self.last_file_position = 0;
-                self.last_step_index = 0;
+        let candidates = self.find_recent_conversations(10);
+        if candidates.is_empty() {
+            return;
+        }
 
-                // Parse task.md or implementation plan if present
-                self.parse_task_progress(&conv_id, state);
+        // Top candidate is the active conversation for workstation Task Tracker
+        let (top_conv_id, _, _) = &candidates[0];
+        let is_new_top = self.most_recent_conv_id.as_deref() != Some(top_conv_id);
+        if is_new_top {
+            info!("AntigravityWatcher: Active session switched to {}", top_conv_id);
+            self.most_recent_conv_id = Some(top_conv_id.clone());
+            self.parse_task_progress(top_conv_id, state);
+        }
+
+        // Process all active conversations to collect multi-project chats
+        for (conv_id, transcript_path, modified) in candidates {
+            let conv_dir = self.base_brain_dir.join(&conv_id);
+
+            // Register newly discovered conversation
+            if !self.tracked.contains_key(&conv_id) {
+                let (project_name, conversation_title) = Self::detect_project_and_title(&conv_id, &conv_dir, &transcript_path);
+                
+                state.update_project_info(ProjectChatInfo {
+                    id: conv_id.clone(),
+                    project_name: project_name.clone(),
+                    conversation_title: conversation_title.clone(),
+                    ide: IdeSource::Antigravity,
+                    last_updated: Local::now().to_rfc3339(),
+                    step_count: 0,
+                    latest_message_snippet: None,
+                    status: "active".to_string(),
+                });
+
+                self.tracked.insert(conv_id.clone(), TrackedConversation {
+                    conv_id: conv_id.clone(),
+                    transcript_path: transcript_path.clone(),
+                    last_file_position: 0,
+                    last_step_index: 0,
+                    last_modified: SystemTime::UNIX_EPOCH,
+                    project_name,
+                    conversation_title,
+                });
             }
 
-            // Read new lines from transcript
-            self.read_transcript_increments(&transcript_path, state);
-            
-            // Periodically refresh task milestones
-            self.parse_task_progress(&conv_id, state);
+            // Read new increments if modified
+            if let Some(tracker) = self.tracked.get_mut(&conv_id) {
+                if modified > tracker.last_modified {
+                    tracker.last_modified = modified;
+                    Self::read_transcript_increments(tracker, state);
+                }
+            }
+        }
+
+        // Keep top task milestones refreshed
+        if let Some(ref top_id) = self.most_recent_conv_id {
+            self.parse_task_progress(top_id, state);
         }
     }
 
-    fn find_latest_conversation(&self) -> Option<(String, PathBuf)> {
-        let entries = fs::read_dir(&self.base_brain_dir).ok()?;
+    fn find_recent_conversations(&self, limit: usize) -> Vec<(String, PathBuf, SystemTime)> {
+        let entries = match fs::read_dir(&self.base_brain_dir) {
+            Ok(e) => e,
+            Err(_) => return Vec::new(),
+        };
+
         let mut candidates: Vec<(String, PathBuf, SystemTime)> = Vec::new();
 
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                let conv_id = path.file_name()?.to_string_lossy().to_string();
+                let conv_id = match path.file_name() {
+                    Some(name) => name.to_string_lossy().to_string(),
+                    None => continue,
+                };
                 if conv_id.starts_with('.') || conv_id == "tempmediaStorage" || conv_id == "forge-inbox" {
                     continue;
                 }
@@ -84,17 +134,87 @@ impl AntigravityWatcher {
         }
 
         candidates.sort_by(|a, b| b.2.cmp(&a.2));
-        candidates.into_iter().next().map(|(id, path, _)| (id, path))
+        candidates.truncate(limit);
+        candidates
     }
 
-    fn read_transcript_increments(&mut self, transcript_path: &Path, state: &SharedState) {
-        let file = match File::open(transcript_path) {
+    fn detect_project_and_title(conv_id: &str, conv_dir: &Path, transcript_path: &Path) -> (String, String) {
+        let mut project_name = "PulseBridge".to_string();
+        let mut conv_title = format!("Session {}", &conv_id[..conv_id.len().min(8)]);
+
+        // 1. Check task.md or implementation_plan.md
+        let task_file = conv_dir.join("task.md");
+        let impl_file = conv_dir.join("implementation_plan.md");
+        let target_file = if task_file.exists() {
+            Some(task_file)
+        } else if impl_file.exists() {
+            Some(impl_file)
+        } else {
+            None
+        };
+
+        if let Some(f) = target_file {
+            if let Ok(content) = fs::read_to_string(&f) {
+                for line in content.lines().take(25) {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("# ") {
+                        conv_title = trimmed.trim_start_matches("# ").trim().to_string();
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 2. Inspect first lines of transcript.jsonl for workspace/project indicators
+        if let Ok(file) = File::open(transcript_path) {
+            let reader = BufReader::new(file);
+            for line_res in reader.lines().take(6) {
+                if let Ok(line) = line_res {
+                    let lower = line.to_lowercase();
+                    if lower.contains("c:\\\\infinity") || lower.contains("c:/infinity") || lower.contains("claude-academy") || lower.contains("academy") {
+                        project_name = "Infinity TechStack".to_string();
+                    } else if lower.contains("c:\\\\pulsebridge") || lower.contains("c:/pulsebridge") {
+                        project_name = "PulseBridge".to_string();
+                    }
+
+                    // Extract title from first user prompt if still default
+                    if conv_title.starts_with("Session ") {
+                        if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                            let is_user = v.get("source").and_then(|s| s.as_str()).map(|s| s.starts_with("USER")).unwrap_or(false);
+                            if is_user {
+                                if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
+                                    for cl in content.lines() {
+                                        let t = cl.trim();
+                                        if !t.is_empty() && !t.starts_with('<') {
+                                            let clean = if t.chars().count() > 60 {
+                                                let trunc: String = t.chars().take(57).collect();
+                                                format!("{trunc}...")
+                                            } else {
+                                                t.to_string()
+                                            };
+                                            conv_title = clean;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        (project_name, conv_title)
+    }
+
+    fn read_transcript_increments(tracker: &mut TrackedConversation, state: &SharedState) {
+        let file = match File::open(&tracker.transcript_path) {
             Ok(f) => f,
             Err(_) => return,
         };
 
         let mut reader = BufReader::new(file);
-        if let Err(_) = reader.seek(SeekFrom::Start(self.last_file_position)) {
+        if reader.seek(SeekFrom::Start(tracker.last_file_position)).is_err() {
             return;
         }
 
@@ -104,14 +224,17 @@ impl AntigravityWatcher {
                 break;
             }
 
-            self.last_file_position += bytes_read as u64;
+            tracker.last_file_position += bytes_read as u64;
             let trimmed = line.trim();
             if !trimmed.is_empty() {
                 if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
-                    if let Some(step) = self.parse_json_step(&v) {
-                        if step.step_index > self.last_step_index {
-                            self.last_step_index = step.step_index;
+                    if let Some(mut step) = Self::parse_json_step(&v, &tracker.conv_id) {
+                        if step.step_index > tracker.last_step_index {
+                            tracker.last_step_index = step.step_index;
                         }
+                        step.project_name = Some(tracker.project_name.clone());
+                        step.conversation_id = Some(tracker.conv_id.clone());
+                        step.conversation_title = Some(tracker.conversation_title.clone());
                         state.add_chat_step(step);
                     }
                 }
@@ -120,7 +243,7 @@ impl AntigravityWatcher {
         }
     }
 
-    fn parse_json_step(&self, v: &Value) -> Option<ChatStep> {
+    fn parse_json_step(v: &Value, conv_id: &str) -> Option<ChatStep> {
         let step_index = v.get("step_index").and_then(|x| x.as_u64()).unwrap_or(0);
         let source = v.get("source").and_then(|x| x.as_str()).unwrap_or("SYSTEM").to_string();
         let step_type = v.get("type").and_then(|x| x.as_str()).unwrap_or("STEP").to_string();
@@ -163,8 +286,10 @@ impl AntigravityWatcher {
 
         let tool_calls_opt = if tool_calls.is_empty() { None } else { Some(tool_calls) };
 
+        let short_id = if conv_id.len() >= 8 { &conv_id[..8] } else { conv_id };
+
         Some(ChatStep {
-            id: format!("antigravity-{step_index}"),
+            id: format!("antigravity-{short_id}-{step_index}"),
             step_index,
             timestamp,
             source,
@@ -174,6 +299,9 @@ impl AntigravityWatcher {
             thinking,
             tool_calls: tool_calls_opt,
             ide: IdeSource::Antigravity,
+            project_name: None,
+            conversation_id: None,
+            conversation_title: None,
         })
     }
 

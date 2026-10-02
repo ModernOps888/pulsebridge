@@ -52,6 +52,7 @@ async fn handle_socket(socket: WebSocket, state: SharedState, initial_token: Opt
             recent_steps: state.get_recent_steps(),
             telemetry: state.get_telemetry(),
             windows: ScreenCapturer::list_ide_windows(),
+            projects: state.get_project_chats(),
         };
 
         if let Ok(json_str) = serde_json::to_string(&init_msg) {
@@ -140,6 +141,7 @@ async fn handle_socket(socket: WebSocket, state: SharedState, initial_token: Opt
                                     recent_steps: state_for_reader.get_recent_steps(),
                                     telemetry: state_for_reader.get_telemetry(),
                                     windows: ScreenCapturer::list_ide_windows(),
+                                    projects: state_for_reader.get_project_chats(),
                                 };
                                 let _ = ws_out_tx.send(Message::Text(serde_json::to_string(&resp).unwrap()));
                                 let _ = ws_out_tx.send(Message::Text(serde_json::to_string(&init).unwrap()));
