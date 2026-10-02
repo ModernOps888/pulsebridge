@@ -9,6 +9,11 @@ import {
   Sparkles,
   CheckCircle,
   AlertCircle,
+  Clipboard,
+  Copy,
+  Check,
+  BellRing,
+  TerminalSquare,
 } from 'lucide-react'
 import type { IdeSource } from '../types'
 
@@ -16,12 +21,20 @@ interface RemoteControlDrawerProps {
   token: string | null
   activeIde?: IdeSource
   onAlert: (msg: string) => void
+  notificationPermission?: NotificationPermission
+  onRequestNotificationPermission?: () => Promise<boolean>
+  onFetchClipboard?: () => Promise<string>
+  onSendClipboard?: (text: string) => Promise<boolean>
 }
 
 export function RemoteControlDrawer({
   token,
   activeIde = 'antigravity',
   onAlert,
+  notificationPermission = 'default',
+  onRequestNotificationPermission,
+  onFetchClipboard,
+  onSendClipboard,
 }: RemoteControlDrawerProps) {
   const [prompt, setPrompt] = useState('')
   const [targetIde, setTargetIde] = useState<IdeSource>(activeIde)
@@ -32,6 +45,14 @@ export function RemoteControlDrawer({
   const [isRecording, setIsRecording] = useState(false)
   const [loading, setLoading] = useState(false)
   const [lastResult, setLastResult] = useState<{ success: boolean; message: string } | null>(null)
+
+  // Workstation Clipboard Sync State
+  const [clipboardText, setClipboardText] = useState('')
+  const [clipboardStatus, setClipboardStatus] = useState<string | null>(null)
+  const [clipboardCopied, setClipboardCopied] = useState(false)
+
+  // DevOps Terminal Output State
+  const [terminalOutput, setTerminalOutput] = useState<string | null>(null)
 
   const toggleSpeechRecognition = () => {
     const SpeechRecognition =
@@ -80,6 +101,7 @@ export function RemoteControlDrawer({
     if (!prompt.trim() || loading) return
     setLoading(true)
     setLastResult(null)
+    setTerminalOutput(null)
 
     try {
       const res = await fetch('/api/action/remote_prompt', {
@@ -100,6 +122,9 @@ export function RemoteControlDrawer({
       const data = await res.json()
       if (res.ok && data.success) {
         setLastResult({ success: true, message: data.message })
+        if (data.stdout) {
+          setTerminalOutput(data.stdout)
+        }
         setPrompt('')
         onAlert('Prompt dispatched to your PC!')
       } else {
@@ -118,12 +143,105 @@ export function RemoteControlDrawer({
     }
   }
 
+  const handleQuickCommand = async (cmd: string) => {
+    setPrompt(cmd)
+    setActionMode('execute_command')
+    setLoading(true)
+    setLastResult(null)
+    setTerminalOutput(null)
+
+    try {
+      const res = await fetch('/api/action/remote_prompt', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          message: cmd,
+          target_ide: targetIde,
+          action_mode: 'execute_command',
+          command: cmd,
+        }),
+      })
+
+      const data = await res.json()
+      if (res.ok && data.success) {
+        setLastResult({ success: true, message: `Executed: ${cmd}` })
+        setTerminalOutput(data.stdout || data.message || 'Command executed.')
+        onAlert(`Executed: ${cmd}`)
+      } else {
+        setLastResult({
+          success: false,
+          message: data.message || 'Execution error',
+        })
+      }
+    } catch (err) {
+      setLastResult({
+        success: false,
+        message: 'Connection error',
+      })
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handlePullClipboard = async () => {
+    if (onFetchClipboard) {
+      setClipboardStatus('Reading...')
+      const txt = await onFetchClipboard()
+      setClipboardText(txt)
+      setClipboardStatus(txt ? 'Pulled from Workstation!' : 'Workstation clipboard empty')
+      setTimeout(() => setClipboardStatus(null), 2500)
+    }
+  }
+
+  const handlePushClipboard = async () => {
+    if (onSendClipboard && clipboardText.trim()) {
+      setClipboardStatus('Sending...')
+      const ok = await onSendClipboard(clipboardText.trim())
+      setClipboardStatus(ok ? 'Pushed to Workstation!' : 'Push failed')
+      setTimeout(() => setClipboardStatus(null), 2500)
+    }
+  }
+
+  const handleCopyLocal = () => {
+    if (clipboardText) {
+      navigator.clipboard.writeText(clipboardText)
+      setClipboardCopied(true)
+      setTimeout(() => setClipboardCopied(false), 2000)
+    }
+  }
+
   const applyPreset = (presetText: string) => {
     setPrompt(presetText)
   }
 
   return (
     <div className="space-y-4 pb-28 p-4 max-w-2xl mx-auto select-none">
+      {/* Background Push Notifications Callout Banner */}
+      {notificationPermission !== 'granted' && onRequestNotificationPermission && (
+        <div className="rounded-2xl bg-gradient-to-r from-amber-950/60 via-yellow-950/40 to-emerald-950/60 border border-amber-500/40 p-3.5 flex items-center justify-between gap-3 shadow-md animate-slideDown">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400 shrink-0">
+              <BellRing className="w-4 h-4 animate-bounce" />
+            </div>
+            <div>
+              <h4 className="text-xs font-bold text-amber-200">Lock-Screen Push Notifications</h4>
+              <p className="text-[10px] text-emerald-400/90 leading-tight">
+                Receive vibration & alerts when tasks finish while your phone is locked.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => onRequestNotificationPermission()}
+            className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-500 text-black text-xs font-bold shrink-0 shadow-sm active:scale-95 transition-all"
+          >
+            Enable
+          </button>
+        </div>
+      )}
+
       {/* Title Card */}
       <div className="rounded-2xl bg-[#0a0f0c] border border-amber-500/30 p-5 space-y-2 shadow-lg">
         <div className="flex items-center gap-2">
@@ -166,6 +284,99 @@ export function RemoteControlDrawer({
         </div>
       </div>
 
+      {/* Workstation Remote Clipboard Sync Card */}
+      <div className="rounded-2xl bg-[#0a0f0c] border border-emerald-900/60 p-4 space-y-2.5 shadow-md">
+        <div className="flex items-center justify-between">
+          <span className="text-[11px] font-bold text-amber-300 flex items-center gap-1.5">
+            <Clipboard className="w-3.5 h-3.5 text-amber-400" />
+            Workstation Clipboard Sync
+          </span>
+          {clipboardStatus && (
+            <span className="text-[10px] font-mono text-emerald-400 animate-pulse">
+              {clipboardStatus}
+            </span>
+          )}
+        </div>
+
+        <div className="relative">
+          <textarea
+            rows={2}
+            value={clipboardText}
+            onChange={(e) => setClipboardText(e.target.value)}
+            placeholder="Type snippet or pull clipboard from workstation..."
+            className="w-full bg-[#0d140f] border border-emerald-950 rounded-xl p-2.5 text-xs text-amber-100 placeholder-emerald-600/40 focus:outline-none focus:border-amber-400 font-mono resize-none"
+          />
+          {clipboardText && (
+            <button
+              onClick={handleCopyLocal}
+              className="absolute top-2 right-2 p-1.5 rounded-lg bg-[#060907] border border-emerald-900 text-emerald-300 hover:text-amber-300"
+              title="Copy to Phone"
+            >
+              {clipboardCopied ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+            </button>
+          )}
+        </div>
+
+        <div className="flex gap-2">
+          <button
+            onClick={handlePullClipboard}
+            className="flex-1 py-1.5 rounded-xl bg-[#0d140f] border border-emerald-950 hover:border-amber-400 text-emerald-300 text-[10px] font-bold flex items-center justify-center gap-1.5 transition-all"
+          >
+            <span>📥 Pull from PC</span>
+          </button>
+          <button
+            onClick={handlePushClipboard}
+            disabled={!clipboardText.trim()}
+            className="flex-1 py-1.5 rounded-xl bg-gradient-to-r from-amber-600 to-yellow-500 disabled:opacity-40 text-black text-[10px] font-bold flex items-center justify-center gap-1.5 shadow-sm transition-all"
+          >
+            <span>📋 Push to PC</span>
+          </button>
+        </div>
+      </div>
+
+      {/* DevOps Quick Runbook Toolbar */}
+      <div className="rounded-2xl bg-[#0a0f0c] border border-emerald-900/60 p-4 space-y-2.5 shadow-md">
+        <span className="text-[11px] font-bold text-emerald-300 flex items-center gap-1.5">
+          <TerminalSquare className="w-3.5 h-3.5 text-amber-400" />
+          DevOps Quick Runbook (1-Tap PC Shell)
+        </span>
+
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+          {[
+            { label: 'git status', cmd: 'git status' },
+            { label: 'git diff --stat', cmd: 'git diff --stat' },
+            { label: 'git log -1', cmd: 'git log -1' },
+            { label: 'npm test', cmd: 'npm test' },
+            { label: 'cargo check', cmd: 'cargo check' },
+            { label: 'git pull', cmd: 'git pull' },
+            { label: 'dir / ls', cmd: 'dir' },
+            { label: 'whoami / info', cmd: 'whoami; hostname' },
+          ].map((action, i) => (
+            <button
+              key={i}
+              onClick={() => handleQuickCommand(action.cmd)}
+              disabled={loading}
+              className="p-2 rounded-xl bg-[#0d140f] border border-emerald-950 hover:border-amber-400 text-emerald-300 active:bg-amber-600 active:text-black transition-all text-center flex flex-col items-center justify-center font-mono text-[10px] font-bold"
+            >
+              {action.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Live Terminal Output Drawer */}
+        {terminalOutput && (
+          <div className="mt-2 rounded-xl bg-black border border-emerald-900/80 p-3 font-mono text-[10px] text-emerald-300 max-h-48 overflow-y-auto whitespace-pre-wrap select-text">
+            <div className="flex items-center justify-between pb-1 mb-1 border-b border-emerald-950 text-[9px] text-gray-400">
+              <span>WORKSTATION TERMINAL OUTPUT</span>
+              <button onClick={() => setTerminalOutput(null)} className="text-amber-400 hover:text-amber-300">
+                Close
+              </button>
+            </div>
+            {terminalOutput}
+          </div>
+        )}
+      </div>
+
       {/* Target IDE & Configuration */}
       <div className="rounded-2xl bg-[#0a0f0c] border border-emerald-900/60 p-4 space-y-3 shadow-md">
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -199,7 +410,7 @@ export function RemoteControlDrawer({
 
         {/* Quick Presets */}
         <div className="space-y-1.5 pt-1">
-          <label className="text-[10px] text-amber-400/90 font-medium">Quick Remote Actions</label>
+          <label className="text-[10px] text-amber-400/90 font-medium">Quick AI Prompts</label>
           <div className="flex gap-1.5 overflow-x-auto pb-1 scrollbar-none">
             {[
               'Fix typo on website: check the header and change to correct spelling',

@@ -25,6 +25,10 @@ export function App() {
     latencyMs,
     isSoundEnabled,
     toggleSound,
+    notificationPermission,
+    requestNotificationPermission,
+    fetchWorkstationClipboard,
+    sendToWorkstationClipboard,
     loginWithPin,
     logout,
     sendPrompt,
@@ -105,6 +109,10 @@ export function App() {
             token={token}
             activeIde={task?.active_ide}
             onAlert={showToast}
+            notificationPermission={notificationPermission}
+            onRequestNotificationPermission={requestNotificationPermission}
+            onFetchClipboard={fetchWorkstationClipboard}
+            onSendClipboard={sendToWorkstationClipboard}
           />
         )}
         {activeTab === 'preview' && (

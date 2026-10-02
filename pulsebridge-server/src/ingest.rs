@@ -148,4 +148,25 @@ pub async fn handle_mouse_scroll(
     }
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct ClipboardPayload {
+    pub text: String,
+}
+
+pub async fn handle_get_clipboard() -> impl IntoResponse {
+    let text = crate::remote_action::get_clipboard_text().unwrap_or_default();
+    (StatusCode::OK, Json(json!({ "success": true, "text": text })))
+}
+
+pub async fn handle_set_clipboard(
+    Json(payload): Json<ClipboardPayload>,
+) -> impl IntoResponse {
+    let ok = crate::remote_action::set_clipboard_text(&payload.text);
+    if ok {
+        (StatusCode::OK, Json(json!({ "success": true, "message": "Workstation clipboard updated" })))
+    } else {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "success": false, "message": "Failed to set workstation clipboard" })))
+    }
+}
+
 

@@ -46,6 +46,7 @@ export function IdePreview({
   const [refreshInterval, setRefreshInterval] = useState<number>(3000)
   const [autoRefresh, setAutoRefresh] = useState<boolean>(true)
   const [zoomLevel, setZoomLevel] = useState<number>(1)
+  const [streamQuality, setStreamQuality] = useState<number>(70)
   const [loading, setLoading] = useState<boolean>(false)
   const [directImageUrl, setDirectImageUrl] = useState<string>('')
   const [lastRefreshedAt, setLastRefreshedAt] = useState<string>('')
@@ -75,7 +76,7 @@ export function IdePreview({
     const timestamp = Date.now()
     const winParam = selectedWindowId ? `&window_id=${selectedWindowId}` : ''
     const tokParam = token ? `?token=${encodeURIComponent(token)}` : '?token='
-    const url = `/api/preview/frame${tokParam}${winParam}&quality=70&_t=${timestamp}`
+    const url = `/api/preview/frame${tokParam}${winParam}&quality=${streamQuality}&_t=${timestamp}`
     setDirectImageUrl(url)
     setLastRefreshedAt(new Date().toLocaleTimeString())
     onRequestSnapshot(selectedWindowId)
@@ -91,7 +92,7 @@ export function IdePreview({
     }, refreshInterval)
 
     return () => clearInterval(timer)
-  }, [selectedWindowId, autoRefresh, refreshInterval, token])
+  }, [selectedWindowId, autoRefresh, refreshInterval, streamQuality, token])
 
   // Remote click handler
   const handleImageClick = async (e: React.PointerEvent<HTMLImageElement>) => {
@@ -349,8 +350,8 @@ export function IdePreview({
           </div>
         </div>
 
-        {/* Window Selector & Refresh Rates */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+        {/* Window Selector, Refresh Rates & Stream Quality */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1">
           <div className="space-y-1">
             <label className="text-[10px] text-amber-400/90 font-medium">Target Screen / Window</label>
             <select
@@ -390,6 +391,29 @@ export function IdePreview({
                   }`}
                 >
                   {rate.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <label className="text-[10px] text-amber-400/90 font-medium">Stream Quality</label>
+            <div className="flex gap-1.5">
+              {[
+                { label: 'Eco 40%', q: 40 },
+                { label: 'Normal 70%', q: 70 },
+                { label: 'Retina 90%', q: 90 },
+              ].map((item) => (
+                <button
+                  key={item.q}
+                  onClick={() => setStreamQuality(item.q)}
+                  className={`flex-1 py-1.5 text-[10px] font-bold rounded-xl border transition-all ${
+                    streamQuality === item.q
+                      ? 'bg-amber-950/90 border-amber-500 text-amber-300'
+                      : 'bg-[#0d140f] border-emerald-950 text-emerald-600 hover:text-emerald-300'
+                  }`}
+                >
+                  {item.label}
                 </button>
               ))}
             </div>

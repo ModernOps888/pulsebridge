@@ -70,6 +70,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/action/click", post(ingest::handle_mouse_click))
         .route("/api/action/scroll", post(ingest::handle_mouse_scroll))
         .route("/api/action/hotkey", post(ingest::handle_hotkey))
+        .route(
+            "/api/action/clipboard",
+            get(ingest::handle_get_clipboard).post(ingest::handle_set_clipboard),
+        )
         .route("/ws", get(ws::ws_handler));
 
     // Resolve web dist directory

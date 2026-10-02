@@ -19,6 +19,12 @@ export function usePulseBridge() {
   const [authError, setAuthError] = useState<string | null>(null)
   const [latencyMs, setLatencyMs] = useState<number | null>(null)
   const [isSoundEnabled, setIsSoundEnabled] = useState<boolean>(() => pulseAudio.isSoundEnabled())
+  const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>(() => {
+    if (typeof window !== 'undefined' && 'Notification' in window) {
+      return Notification.permission
+    }
+    return 'default'
+  })
 
   const [task, setTask] = useState<TaskProgress | null>(null)
   const [chatSteps, setChatSteps] = useState<ChatStep[]>([])
@@ -34,6 +40,43 @@ export function usePulseBridge() {
     const next = pulseAudio.toggleSound()
     setIsSoundEnabled(next)
     return next
+  }
+
+  const requestNotificationPermission = async (): Promise<boolean> => {
+    if (typeof window !== 'undefined' && 'Notification' in window) {
+      try {
+        const perm = await Notification.requestPermission()
+        setNotificationPermission(perm)
+        return perm === 'granted'
+      } catch (_) {}
+    }
+    return false
+  }
+
+  const sendBackgroundNotification = (title: string, body?: string) => {
+    if (typeof window === 'undefined' || !('Notification' in window)) return
+    if (Notification.permission !== 'granted') return
+    if (typeof document !== 'undefined' && !document.hidden) return
+
+    if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+      navigator.serviceWorker.controller.postMessage({
+        type: 'SHOW_NOTIFICATION',
+        payload: {
+          title,
+          options: {
+            body: body || 'AI agent milestone update',
+            tag: 'pulsebridge-milestone',
+          },
+        },
+      })
+    } else {
+      try {
+        new Notification(title, {
+          body: body || 'AI agent milestone update',
+          icon: '/favicon.svg',
+        })
+      } catch (_) {}
+    }
   }
 
   // Vibrate mobile device helper
@@ -98,6 +141,10 @@ export function usePulseBridge() {
             triggerHaptic(30)
             if (msg.payload?.source !== 'USER') {
               pulseAudio.playChime('milestone')
+              sendBackgroundNotification(
+                'PulseBridge: AI Milestone Reached ⚡',
+                msg.payload?.content?.slice(0, 100) || 'Task step finished'
+              )
             }
             break
 
@@ -117,6 +164,10 @@ export function usePulseBridge() {
             setAlerts((prev) => [msg.payload, ...prev.slice(0, 9)])
             triggerHaptic([50, 80, 50])
             pulseAudio.playChime('action_required')
+            sendBackgroundNotification(
+              `PulseBridge: ${msg.payload.title || 'Attention Required'} ⚠️`,
+              msg.payload.message || 'The AI agent requires your action'
+            )
             break
         }
       } catch (err) {
@@ -279,6 +330,42 @@ export function usePulseBridge() {
     setAlerts((prev) => prev.filter((a) => a.id !== id))
   }
 
+  // Workstation clipboard synchronization
+  const fetchWorkstationClipboard = async (): Promise<string> => {
+    try {
+      const res = await fetch('/api/action/clipboard', {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (res.ok) {
+        const data = await res.json()
+        return data.text || ''
+      }
+    } catch (err) {
+      console.error('Failed to get workstation clipboard', err)
+    }
+    return ''
+  }
+
+  const sendToWorkstationClipboard = async (text: string): Promise<boolean> => {
+    try {
+      const res = await fetch('/api/action/clipboard', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ text }),
+      })
+      if (res.ok) {
+        triggerHaptic([30, 50])
+        return true
+      }
+    } catch (err) {
+      console.error('Failed to set workstation clipboard', err)
+    }
+    return false
+  }
+
   // Live round-trip latency measurement (RTT)
   useEffect(() => {
     if (!isAuthenticated || !isConnected) {
@@ -344,6 +431,10 @@ export function usePulseBridge() {
     latencyMs,
     isSoundEnabled,
     toggleSound,
+    notificationPermission,
+    requestNotificationPermission,
+    fetchWorkstationClipboard,
+    sendToWorkstationClipboard,
     loginWithPin,
     logout,
     sendPrompt,

@@ -1,0 +1,18 @@
+{
+  "name": "PulseBridge ⚡ Universal AI IDE Companion",
+  "short_name": "PulseBridge",
+  "description": "High-precision, low-latency mobile bridge and telemetry companion for AI-native engineering environments",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#060907",
+  "theme_color": "#060907",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

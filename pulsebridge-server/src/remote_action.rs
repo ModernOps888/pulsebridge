@@ -29,6 +29,8 @@ extern "system" {
     fn CloseClipboard() -> BOOL;
     fn EmptyClipboard() -> BOOL;
     fn SetClipboardData(uFormat: u32, hMem: isize) -> isize;
+    fn GetClipboardData(uFormat: u32) -> isize;
+    fn IsClipboardFormatAvailable(format: u32) -> BOOL;
     fn MapVirtualKeyW(uCode: u32, uMapType: u32) -> u32;
     fn OpenWindowStationA(lpws: *const u8, fInherit: BOOL, dwDesiredAccess: u32) -> isize;
     fn SetProcessWindowStation(hWinSta: isize) -> BOOL;
@@ -69,6 +71,37 @@ pub fn set_clipboard_text(text: &str) -> bool {
         let res = SetClipboardData(CF_UNICODETEXT, hmem);
         CloseClipboard();
         res != 0
+    }
+}
+
+pub fn get_clipboard_text() -> Option<String> {
+    unsafe {
+        const CF_UNICODETEXT: u32 = 13;
+        if IsClipboardFormatAvailable(CF_UNICODETEXT) == 0 {
+            return None;
+        }
+        if OpenClipboard(0) == 0 {
+            return None;
+        }
+        let hmem = GetClipboardData(CF_UNICODETEXT);
+        if hmem == 0 {
+            CloseClipboard();
+            return None;
+        }
+        let ptr = GlobalLock(hmem) as *const u16;
+        if ptr.is_null() {
+            CloseClipboard();
+            return None;
+        }
+        let mut len = 0;
+        while *ptr.add(len) != 0 {
+            len += 1;
+        }
+        let slice = std::slice::from_raw_parts(ptr, len);
+        let text = String::from_utf16_lossy(slice);
+        GlobalUnlock(hmem);
+        CloseClipboard();
+        Some(text)
     }
 }
 
