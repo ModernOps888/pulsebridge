@@ -94,3 +94,48 @@
    - The React mobile client implements an exponential backoff reconnect loop that recovers session state automatically when moving across mobile cell towers or Wi-Fi deadzones.
 3. **Audit Trail**:
    - Every remote prompt, hotkey, and command injected via mobile is logged to the local session ledger and mirrored in the Antigravity `forge-inbox` mailbox for auditing.
+
+---
+
+## 6. Multi-Operating System Architecture: macOS & Linux
+
+While PulseBridge was initially optimized for Windows workstations (GDI + Win32 DWM), the server architecture is intentionally modularized to support **macOS (Darwin)** and **Linux** through unified Rust traits.
+
+### 6.1 Abstract Platform Driver Interface
+
+```rust
+pub trait PlatformCapturer: Send + Sync {
+    fn capture_display(&self, quality: u8) -> Result<Vec<u8>, String>;
+    fn capture_window(&self, window_id: isize, quality: u8) -> Result<Vec<u8>, String>;
+    fn list_ide_windows(&self) -> Vec<IdeWindowInfo>;
+}
+
+pub trait PlatformInput: Send + Sync {
+    fn click(&self, cmd: MouseClickCommand) -> Result<(), String>;
+    fn send_hotkey(&self, hotkey: &str) -> Result<(), String>;
+    fn inject_prompt(&self, text: &str, target_window: Option<isize>) -> Result<(), String>;
+}
+
+pub trait PlatformTelemetry: Send + Sync {
+    fn collect_metrics(&self) -> SystemTelemetry;
+}
+```
+
+### 6.2 macOS Implementation Specifics (Darwin)
+
+| Subsystem | macOS Implementation Strategy | Framework / API |
+| :--- | :--- | :--- |
+| **Display Capture** | Hardware-accelerated GPU capture via `ScreenCaptureKit` (macOS 12.3+) or Quartz Display Services fallback | `ScreenCaptureKit`, `CGDisplayCreateImage` |
+| **Window Enumeration** | Queries active window list and bundle IDs matching Cursor, VS Code, or Antigravity | `CGWindowListCopyWindowInfo`, `NSWorkspace` |
+| **Mouse & Touch Injection** | Dispatches calibrated clicks via Quartz Event Taps directly to screen coordinates | `CGEventCreateMouseEvent`, `CGEventPost` |
+| **Caret Prompt Injection** | Populates system pasteboard and injects `Cmd + V` + `Return` with zero character latency | `NSPasteboard` (`pbcopy`), `CGEventCreateKeyboardEvent` |
+| **Hardware Telemetry** | Reads Mach kernel host statistics and battery charging status | `host_processor_info`, `host_statistics64`, `IOPowerSources` |
+| **OS Permissions** | Requires user authorization in **System Settings > Privacy & Security** | *Screen Recording* & *Accessibility* |
+
+### 6.3 Linux Implementation Specifics (X11 & Wayland)
+
+| Subsystem | Linux Implementation Strategy |
+| :--- | :--- |
+| **Display Capture** | `XShmGetImage` (X11) / `xdg-desktop-portal` Screencast (Wayland) |
+| **Mouse & Touch Injection** | Direct `uinput` virtual device driver or `xdotool` / `ydotool` dispatch |
+| **System Telemetry** | Direct low-overhead reads from `/proc/stat`, `/proc/meminfo`, and `/sys/class/power_supply` |
