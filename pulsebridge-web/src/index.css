@@ -50,28 +50,29 @@ body {
   scroll-behavior: smooth;
   scrollbar-width: auto;
   scrollbar-color: #facc15 #050806;
+  overscroll-behavior: contain;
 }
 
 .viewport-zoom-scroll::-webkit-scrollbar {
-  width: 12px;
-  height: 12px;
+  width: 14px;
+  height: 14px;
 }
 .viewport-zoom-scroll::-webkit-scrollbar-track {
   background: #050806;
-  border: 1.5px solid rgba(234, 179, 8, 0.35);
+  border: 1.5px solid rgba(234, 179, 8, 0.45);
   border-radius: 9999px;
-  margin: 3px;
+  margin: 2px;
 }
 .viewport-zoom-scroll::-webkit-scrollbar-thumb {
-  background: linear-gradient(135deg, #fde047 0%, #ca8a04 100%);
+  background: linear-gradient(135deg, #facc15 0%, #ca8a04 100%);
   border: 2px solid #060907;
   border-radius: 9999px;
-  box-shadow: 0 0 12px rgba(234, 179, 8, 0.7);
+  box-shadow: 0 0 14px rgba(234, 179, 8, 0.85);
 }
 .viewport-zoom-scroll::-webkit-scrollbar-thumb:hover,
 .viewport-zoom-scroll::-webkit-scrollbar-thumb:active {
   background: #fef08a;
-  box-shadow: 0 0 18px rgba(234, 179, 8, 1);
+  box-shadow: 0 0 20px rgba(234, 179, 8, 1);
 }
 
 /* Gilded Emerald Glowing Animations */

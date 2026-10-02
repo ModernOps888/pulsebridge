@@ -101,7 +101,7 @@ export function App() {
       </div>
 
       {/* Main Tab View */}
-      <main className="flex-1 w-full max-w-lg mx-auto">
+      <main className={`flex-1 w-full mx-auto transition-all ${activeTab === 'preview' ? 'max-w-4xl px-2 sm:px-4' : 'max-w-lg'}`}>
         {activeTab === 'tracker' && <TaskTracker task={task} />}
         {activeTab === 'chat' && <ChatStream steps={chatSteps} onSendPrompt={sendPrompt} />}
         {activeTab === 'commander' && (

@@ -4,8 +4,7 @@ import sys
 import time
 
 BASE_URL = "http://127.0.0.1:8080"
-PIN = "172152"
-TOKEN = "e9a905ed-cef3-4380-a9cf-a624ca85070e"
+PIN = sys.argv[1] if len(sys.argv) > 1 else "628302"
 
 print("==================================================================")
 print("     PULSEBRIDGE DEEP END-TO-END VERIFICATION TEST SUITE         ")
@@ -41,13 +40,14 @@ r = requests.get(f"{BASE_URL}/sw.js")
 assert_test("sw.js Service Worker Status 200", r.status_code == 200)
 assert_test("sw.js Content Verified", "SHOW_NOTIFICATION" in r.text)
 
-# 2. TEST AUTHENTICATION & PIN VERIFICATION
+# 2. TEST AUTHENTICATION & DYNAMIC TOKEN ISSUANCE
 print("\n[*] Phase 2: Authentication & Token Issuance")
 r = requests.post(f"{BASE_URL}/api/auth/login", json={"pin": PIN})
 assert_test("Login Valid PIN Status 200", r.status_code == 200)
 data = r.json()
 assert_test("Login Success True", data.get("success") == True)
-assert_test("Login Token Issued", bool(data.get("token")))
+TOKEN = data.get("token")
+assert_test("Login Token Issued", bool(TOKEN), f"(Token: {TOKEN[:8]}...)")
 
 r = requests.post(f"{BASE_URL}/api/auth/login", json={"pin": "000000"})
 assert_test("Login Invalid PIN Status 401", r.status_code == 401)
@@ -129,15 +129,28 @@ assert_test("Preview Frame Retina (90%) Status 200", r_retina.status_code == 200
 assert_test("Preview Frame Retina Content-Type image/jpeg", r_retina.headers.get("content-type") == "image/jpeg")
 assert_test("Preview Frame Retina Higher Payload Than Eco", len(r_retina.content) > len(r_eco.content), f"({len(r_retina.content)} > {len(r_eco.content)} bytes)")
 
-# 8. TEST BIDIRECTIONAL CHAT PROMPT DISPATCH
-print("\n[*] Phase 8: Bidirectional Prompt Dispatch & Chat State Stream")
-prompt_text = f"Automated Verification Direct Prompt {int(time.time())}"
-r = requests.post(
+# 8. TEST BIDIRECTIONAL CHAT PROMPT DISPATCH & INGEST STREAM
+print("\n[*] Phase 8: Bidirectional Prompt Dispatch & Ingest Event Stream")
+# Test direct prompt action
+r_prompt = requests.post(
     f"{BASE_URL}/api/action/prompt",
     headers={"Authorization": f"Bearer {TOKEN}"},
-    json={"message": prompt_text}
+    json={"message": "Remote prompt test ping"}
 )
-assert_test("POST /api/action/prompt Status 200", r.status_code == 200)
+assert_test("POST /api/action/prompt Status 200", r_prompt.status_code == 200)
+
+# Test real-time ingest event recording
+prompt_text = f"Automated Verification Event {int(time.time())}"
+r_ingest = requests.post(
+    f"{BASE_URL}/api/ingest/event",
+    json={
+        "ide": "antigravity",
+        "event_type": "step",
+        "content": prompt_text,
+        "status": "DONE"
+    }
+)
+assert_test("POST /api/ingest/event Status 200", r_ingest.status_code == 200)
 
 r = requests.get(f"{BASE_URL}/api/chat?token={TOKEN}")
 assert_test("GET /api/chat Status 200", r.status_code == 200)
@@ -152,6 +165,26 @@ r_qr = requests.get(f"{BASE_URL}/api/auth/qr")
 assert_test("GET /api/auth/qr Status 200", r_qr.status_code == 200)
 assert_test("QR Code Content-Type image/svg+xml", "image/svg+xml" in r_qr.headers.get("content-type", ""))
 assert_test("QR Code SVG XML Valid", "<svg" in r_qr.text and "</svg>" in r_qr.text)
+
+# 10. TEST REMOTE CLICK SIMULATION
+print("\n[*] Phase 10: Remote Touch-to-Click Simulation")
+r_click = requests.post(
+    f"{BASE_URL}/api/action/click",
+    headers={"Authorization": f"Bearer {TOKEN}"},
+    json={"x_ratio": 0.5, "y_ratio": 0.5, "is_right": False}
+)
+assert_test("POST /api/action/click Status 200", r_click.status_code == 200)
+assert_test("Click Success True", r_click.json().get("success") == True)
+
+# 11. TEST IDE WINDOW ENUMERATION
+print("\n[*] Phase 11: Discovered IDE Windows Enumeration")
+r_win = requests.get(
+    f"{BASE_URL}/api/ide/windows",
+    headers={"Authorization": f"Bearer {TOKEN}"}
+)
+assert_test("GET /api/ide/windows Status 200", r_win.status_code == 200)
+win_list = r_win.json()
+assert_test("IDE Windows Is List", isinstance(win_list, list))
 
 print("\n==================================================================")
 print(f"     ALL {tests_total}/{tests_total} VERIFICATION CHECKS PASSED WITH 100% SUCCESS!   ")
