@@ -199,3 +199,56 @@ fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
     }
     diff == 0
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_constant_time_compare_logic() {
+        assert!(constant_time_compare(b"123456", b"123456"));
+        assert!(!constant_time_compare(b"123456", b"123457"));
+        assert!(!constant_time_compare(b"123456", b"023456"));
+        assert!(!constant_time_compare(b"12345", b"123456"));
+        assert!(!constant_time_compare(b"", b"123456"));
+        assert!(constant_time_compare(b"", b""));
+    }
+
+    #[test]
+    fn test_rate_limiter_lockout_enforcement() {
+        let auth = AuthManager::new(8080, Some("998877".to_string()), None);
+        let client_ip = "198.51.100.42";
+
+        // Attempts 1 to 4 should report remaining attempts
+        for attempt in 1..=4 {
+            let res = auth.verify_pin_and_issue_token(client_ip, "000000");
+            assert!(res.is_err());
+            let err_msg = res.unwrap_err();
+            let expected_remaining = 5 - attempt;
+            assert!(
+                err_msg.contains(&format!("{expected_remaining} attempts remaining")),
+                "Attempt {attempt} expected {expected_remaining} remaining, got: {err_msg}"
+            );
+        }
+
+        // Attempt 5 triggers the 5-minute lockout
+        let res5 = auth.verify_pin_and_issue_token(client_ip, "000000");
+        assert!(res5.is_err());
+        assert!(res5.unwrap_err().contains("Client locked out for 5 minutes"));
+
+        // Subsequent attempt (even with CORRECT PIN) should be locked out!
+        let locked_res = auth.verify_pin_and_issue_token(client_ip, "998877");
+        assert!(locked_res.is_err());
+        assert!(locked_res.unwrap_err().contains("Too many failed PIN attempts. Locked out for"));
+
+        // A different IP address should NOT be affected
+        let other_ip = "198.51.100.99";
+        let valid_res = auth.verify_pin_and_issue_token(other_ip, "998877");
+        assert!(valid_res.is_ok());
+        let token = valid_res.unwrap();
+        assert!(auth.is_token_valid(&token));
+        assert!(!auth.is_token_valid("fake-token"));
+        assert!(!auth.is_token_valid(""));
+    }
+}
+
