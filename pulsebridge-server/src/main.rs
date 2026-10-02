@@ -16,7 +16,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -47,15 +47,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let auth_manager = AuthManager::new(port, custom_pin, tunnel_url);
     auth_manager.print_startup_banner();
 
-    let state = SharedState::new(auth_manager.clone(), port);
+    let allow_shell_commands = args.iter().any(|a| a == "--enable-shell-commands" || a == "--allow-shell")
+        || std::env::var("PULSEBRIDGE_ENABLE_SHELL").map(|v| v == "1" || v == "true").unwrap_or(false);
+
+    if allow_shell_commands {
+        tracing::warn!("SECURITY POLICY: Remote shell execution is OPTED-IN via flag.");
+    } else {
+        tracing::info!("Zero-Trust Hardening: Remote shell execution is DISABLED by default.");
+    }
+
+    let state = SharedState::new(auth_manager.clone(), port, allow_shell_commands);
 
     // Launch background file & state watchers for Antigravity, Cursor, and VS Code
     start_ide_watchers(state.clone());
 
+    // Restricted CORS Policy: allow localhost, local LAN IP, and Cloudflare quick tunnels
+    let lan_ip_str = auth_manager.get_lan_ip().to_string();
     let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_origin(tower_http::cors::AllowOrigin::predicate(move |origin, _parts| {
+            let origin_str = match origin.to_str() {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+            if origin_str.starts_with("http://localhost") || origin_str.starts_with("http://127.0.0.1") {
+                return true;
+            }
+            if origin_str.starts_with(&format!("http://{}", lan_ip_str)) {
+                return true;
+            }
+            if origin_str.ends_with(".trycloudflare.com") {
+                return true;
+            }
+            false
+        }))
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::OPTIONS,
+        ])
+        .allow_headers([
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::CONTENT_TYPE,
+        ]);
 
     let api_routes = Router::new()
         .route("/api/auth/login", post(api::login_handler))
@@ -112,7 +145,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("PulseBridge Server listening on http://0.0.0.0:{}", port);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
 
     Ok(())
 }

@@ -2,7 +2,8 @@
 param(
     [int]$Port = 8080,
     [string]$Pin = "",
-    [switch]$NoTunnel
+    [switch]$NoTunnel,
+    [switch]$EnableShellCommands
 )
 
 Write-Host "==========================================================" -ForegroundColor Cyan
@@ -43,6 +44,9 @@ if ($Pin -ne "") {
 }
 if ($tunnelUrl -ne "") {
     $argsList += @("--tunnel-url", $tunnelUrl)
+}
+if ($EnableShellCommands) {
+    $argsList += @("--enable-shell-commands")
 }
 
 try {

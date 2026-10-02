@@ -22,6 +22,9 @@ pub struct FrameQuery {
     pub token: Option<String>,
 }
 
+use axum::extract::ConnectInfo;
+use std::net::SocketAddr;
+
 #[derive(Debug, Deserialize)]
 pub struct AuthHeaderQuery {
     pub token: Option<String>,
@@ -29,14 +32,23 @@ pub struct AuthHeaderQuery {
 
 pub async fn login_handler(
     State(state): State<SharedState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(payload): Json<LoginRequest>,
 ) -> impl IntoResponse {
-    let client_ip = headers
-        .get("x-forwarded-for")
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("127.0.0.1")
-        .to_string();
+    // Key rate limiter on physical socket peer IP to prevent spoofing.
+    // Only inspect CF-Connecting-IP / X-Forwarded-For if connection is from local proxy (loopback).
+    let client_ip = if addr.ip().is_loopback() {
+        headers
+            .get("cf-connecting-ip")
+            .or_else(|| headers.get("x-forwarded-for"))
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| s.split(',').next())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| addr.ip().to_string())
+    } else {
+        addr.ip().to_string()
+    };
 
     match state.auth().verify_pin_and_issue_token(&client_ip, &payload.pin) {
         Ok(token) => (
@@ -149,7 +161,7 @@ pub async fn preview_frame_handler(
     }
 }
 
-fn verify_auth(
+pub fn verify_auth(
     state: &SharedState,
     headers: &HeaderMap,
     query_token: Option<&str>,

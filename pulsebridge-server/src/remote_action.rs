@@ -233,7 +233,32 @@ impl RemoteActionDispatcher {
                 }
             }
             RemoteActionMode::ExecuteCommand => {
+                if !state.is_shell_command_allowed() {
+                    warn!("Blocked ExecuteCommand attempt: remote shell execution is disabled by default.");
+                    state.send_alert(
+                        "warning",
+                        "Security Policy Block",
+                        "Remote shell execution is disabled by default for Zero-Trust hardening. Pass --enable-shell-commands to enable.",
+                    );
+                    return RemoteActionResult {
+                        success: false,
+                        message: "Security Policy: Remote shell execution is disabled by default. Launch server with --enable-shell-commands to opt in.".to_string(),
+                        target_window: None,
+                        stdout: None,
+                    };
+                }
+
                 let shell_cmd = cmd.command.unwrap_or_else(|| cmd.message.clone());
+                if !Self::is_command_allowlisted(&shell_cmd) {
+                    warn!("Blocked non-allowlisted shell command: {shell_cmd}");
+                    return RemoteActionResult {
+                        success: false,
+                        message: format!("Security Violation: Command '{shell_cmd}' is not in the approved DevOps allowlist (git, cargo, npm, pnpm, yarn, pytest)."),
+                        target_window: None,
+                        stdout: None,
+                    };
+                }
+
                 let exec_res = Self::execute_quick_shell_command(&shell_cmd).await;
                 RemoteActionResult {
                     success: exec_res.0,
@@ -758,6 +783,39 @@ impl RemoteActionDispatcher {
             }
             Err(e) => (false, format!("Execution failed: {e}")),
         }
+    }
+
+    pub fn is_command_allowlisted(cmd: &str) -> bool {
+        let trimmed = cmd.trim();
+        // Reject shell command chaining, pipes, redirects, backticks, subshells
+        if trimmed.contains('&')
+            || trimmed.contains(';')
+            || trimmed.contains('|')
+            || trimmed.contains('`')
+            || trimmed.contains('$')
+            || trimmed.contains('>')
+            || trimmed.contains('<')
+        {
+            return false;
+        }
+
+        const APPROVED_PREFIXES: &[&str] = &[
+            "git status",
+            "git diff",
+            "git log",
+            "git branch",
+            "cargo check",
+            "cargo test",
+            "cargo build",
+            "npm test",
+            "npm run",
+            "pnpm test",
+            "yarn test",
+            "pytest",
+            "python -m pytest",
+        ];
+
+        APPROVED_PREFIXES.iter().any(|prefix| trimmed.starts_with(prefix))
     }
 }
 

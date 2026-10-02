@@ -1,9 +1,15 @@
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{
+    extract::{Query, State},
+    http::{HeaderMap, StatusCode},
+    response::IntoResponse,
+    Json,
+};
 use chrono::Local;
 use serde::Deserialize;
 use serde_json::json;
 use tracing::info;
 use uuid::Uuid;
+use crate::api::{verify_auth, AuthHeaderQuery};
 use crate::models::{ChatStep, IdeSource, ToolCallInfo};
 use crate::state::SharedState;
 
@@ -21,7 +27,6 @@ pub struct IngestEventPayload {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct SendPromptPayload {
     pub message: String,
     pub target_ide: Option<String>,
@@ -29,8 +34,12 @@ pub struct SendPromptPayload {
 
 pub async fn handle_ingest_event(
     State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(query): Query<AuthHeaderQuery>,
     Json(payload): Json<IngestEventPayload>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, StatusCode> {
+    verify_auth(&state, &headers, query.token.as_deref())?;
+
     let ide_source = match payload.ide.as_deref().unwrap_or("custom").to_lowercase().as_str() {
         "cursor" => IdeSource::Cursor,
         "antigravity" => IdeSource::Antigravity,
@@ -55,7 +64,7 @@ pub async fn handle_ingest_event(
             &format!("Alert from {}", ide_source),
             payload.content.as_deref().unwrap_or(""),
         );
-        return (StatusCode::OK, Json(json!({ "status": "alert_broadcasted" })));
+        return Ok((StatusCode::OK, Json(json!({ "status": "alert_broadcasted" }))));
     }
 
     let tool_calls = if let Some(tname) = payload.tool_name {
@@ -84,13 +93,17 @@ pub async fn handle_ingest_event(
     };
 
     state.add_chat_step(step);
-    (StatusCode::OK, Json(json!({ "status": "ingested" })))
+    Ok((StatusCode::OK, Json(json!({ "status": "ingested" }))))
 }
 
 pub async fn handle_send_prompt(
     State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(query): Query<AuthHeaderQuery>,
     Json(payload): Json<SendPromptPayload>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, StatusCode> {
+    verify_auth(&state, &headers, query.token.as_deref())?;
+
     info!("Received prompt from mobile client: {}", payload.message);
 
     let ide_source = payload.target_ide.as_deref().map(|s| match s.to_lowercase().as_str() {
@@ -110,41 +123,60 @@ pub async fn handle_send_prompt(
     };
 
     let result = crate::remote_action::RemoteActionDispatcher::dispatch(cmd, &state).await;
-    (StatusCode::OK, Json(result))
+    Ok((StatusCode::OK, Json(result)))
 }
 
 pub async fn handle_remote_action(
     State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(query): Query<AuthHeaderQuery>,
     Json(payload): Json<crate::remote_action::RemotePromptCommand>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, StatusCode> {
+    verify_auth(&state, &headers, query.token.as_deref())?;
+
     let result = crate::remote_action::RemoteActionDispatcher::dispatch(payload, &state).await;
-    (StatusCode::OK, Json(result))
+    Ok((StatusCode::OK, Json(result)))
 }
 
 pub async fn handle_mouse_click(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(query): Query<AuthHeaderQuery>,
     Json(payload): Json<crate::remote_action::MouseClickCommand>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, StatusCode> {
+    verify_auth(&state, &headers, query.token.as_deref())?;
+
     match crate::remote_action::RemoteActionDispatcher::simulate_click(payload) {
-        Ok(_) => (StatusCode::OK, Json(json!({ "success": true }))),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "success": false, "error": e }))),
+        Ok(_) => Ok((StatusCode::OK, Json(json!({ "success": true })))),
+        Err(e) => Ok((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "success": false, "error": e })))),
     }
 }
 
 pub async fn handle_hotkey(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(query): Query<AuthHeaderQuery>,
     Json(payload): Json<crate::remote_action::HotkeyCommand>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, StatusCode> {
+    verify_auth(&state, &headers, query.token.as_deref())?;
+
     match crate::remote_action::RemoteActionDispatcher::simulate_hotkey(&payload.key) {
-        Ok(_) => (StatusCode::OK, Json(json!({ "success": true }))),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "success": false, "error": e }))),
+        Ok(_) => Ok((StatusCode::OK, Json(json!({ "success": true })))),
+        Err(e) => Ok((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "success": false, "error": e })))),
     }
 }
 
 pub async fn handle_mouse_scroll(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(query): Query<AuthHeaderQuery>,
     Json(payload): Json<crate::remote_action::MouseScrollCommand>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, StatusCode> {
+    verify_auth(&state, &headers, query.token.as_deref())?;
+
     match crate::remote_action::RemoteActionDispatcher::simulate_scroll(payload) {
-        Ok(_) => (StatusCode::OK, Json(json!({ "success": true }))),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "success": false, "error": e }))),
+        Ok(_) => Ok((StatusCode::OK, Json(json!({ "success": true })))),
+        Err(e) => Ok((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "success": false, "error": e })))),
     }
 }
 
@@ -153,20 +185,29 @@ pub struct ClipboardPayload {
     pub text: String,
 }
 
-pub async fn handle_get_clipboard() -> impl IntoResponse {
+pub async fn handle_get_clipboard(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(query): Query<AuthHeaderQuery>,
+) -> Result<impl IntoResponse, StatusCode> {
+    verify_auth(&state, &headers, query.token.as_deref())?;
+
     let text = crate::remote_action::get_clipboard_text().unwrap_or_default();
-    (StatusCode::OK, Json(json!({ "success": true, "text": text })))
+    Ok((StatusCode::OK, Json(json!({ "success": true, "text": text }))))
 }
 
 pub async fn handle_set_clipboard(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(query): Query<AuthHeaderQuery>,
     Json(payload): Json<ClipboardPayload>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, StatusCode> {
+    verify_auth(&state, &headers, query.token.as_deref())?;
+
     let ok = crate::remote_action::set_clipboard_text(&payload.text);
     if ok {
-        (StatusCode::OK, Json(json!({ "success": true, "message": "Workstation clipboard updated" })))
+        Ok((StatusCode::OK, Json(json!({ "success": true, "message": "Workstation clipboard updated" }))))
     } else {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "success": false, "message": "Failed to set workstation clipboard" })))
+        Ok((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "success": false, "message": "Failed to set workstation clipboard" }))))
     }
 }
-
-

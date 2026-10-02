@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use axum::{
     extract::{
@@ -41,6 +43,8 @@ async fn handle_socket(socket: WebSocket, state: SharedState, initial_token: Opt
         }
     }
 
+    let auth_flag = Arc::new(AtomicBool::new(is_authenticated));
+
     // If pre-authenticated via query token, send initial state immediately
     if is_authenticated {
         let init_msg = WsServerMessage::InitialState {
@@ -70,10 +74,14 @@ async fn handle_socket(socket: WebSocket, state: SharedState, initial_token: Opt
         }
     });
 
-    // Task 2: Broadcast listener forwarding to ws_out_tx
+    // Task 2: Broadcast listener forwarding to ws_out_tx (GATED strictly by authentication)
     let ws_out_tx_broadcast = ws_out_tx.clone();
+    let auth_flag_broadcast = auth_flag.clone();
     let broadcast_task = tokio::spawn(async move {
         while let Ok(server_msg) = broadcast_rx.recv().await {
+            if !auth_flag_broadcast.load(Ordering::Relaxed) {
+                continue;
+            }
             if let Ok(json) = serde_json::to_string(&server_msg) {
                 if ws_out_tx_broadcast.send(Message::Text(json)).is_err() {
                     break;
@@ -82,13 +90,17 @@ async fn handle_socket(socket: WebSocket, state: SharedState, initial_token: Opt
         }
     });
 
-    // Task 3: Telemetry heartbeat (every 3 seconds)
+    // Task 3: Telemetry heartbeat (every 3s, GATED strictly by authentication)
     let ws_out_tx_heartbeat = ws_out_tx.clone();
     let state_telemetry = state.clone();
+    let auth_flag_telem = auth_flag.clone();
     let telemetry_task = tokio::spawn(async move {
         let mut tick = interval(Duration::from_secs(3));
         loop {
             tick.tick().await;
+            if !auth_flag_telem.load(Ordering::Relaxed) {
+                continue;
+            }
             let telem = state_telemetry.get_telemetry();
             let msg = WsServerMessage::TelemetryUpdate(telem);
             if let Ok(json) = serde_json::to_string(&msg) {
@@ -96,6 +108,16 @@ async fn handle_socket(socket: WebSocket, state: SharedState, initial_token: Opt
                     break;
                 }
             }
+        }
+    });
+
+    // Task 4: Unauthenticated connection timeout (15s disconnect)
+    let auth_flag_timeout = auth_flag.clone();
+    let ws_out_tx_timeout = ws_out_tx.clone();
+    let timeout_task = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        if !auth_flag_timeout.load(Ordering::Relaxed) {
+            let _ = ws_out_tx_timeout.send(Message::Close(None));
         }
     });
 
@@ -108,6 +130,7 @@ async fn handle_socket(socket: WebSocket, state: SharedState, initial_token: Opt
                         WsClientMessage::Auth { token } => {
                             if state_for_reader.auth().is_token_valid(&token) {
                                 is_authenticated = true;
+                                auth_flag.store(true, Ordering::Relaxed);
                                 let resp = WsServerMessage::AuthResponse {
                                     success: true,
                                     message: "Access granted".to_string(),
@@ -183,4 +206,5 @@ async fn handle_socket(socket: WebSocket, state: SharedState, initial_token: Opt
     writer_task.abort();
     broadcast_task.abort();
     telemetry_task.abort();
+    timeout_task.abort();
 }

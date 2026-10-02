@@ -47,8 +47,8 @@ PulseBridge is built as a zero-dependency, ultra-lightweight native bridge compr
 │         │ • VS Code / Cline │          │ • check_inbox     │           │
 │         └───────────────────┘          └───────────────────┘           │
 └───────────────────────────────────▲────────────────────────────────────┘
-                                    │ Encrypted WebSockets & HTTPS
-                                    │ (Wi-Fi LAN / 4G Cellular Tunnel)
+                                    │ WebSockets & HTTP (LAN)
+                                    │ TLS Encrypted via Cloudflare Quick Tunnel (WAN)
 ┌───────────────────────────────────▼────────────────────────────────────┐
 │                    MOBILE COMPANION (REACT 19 PWA)                     │
 │                                                                        │
@@ -107,14 +107,16 @@ PulseBridge is built as a zero-dependency, ultra-lightweight native bridge compr
 - **Cursor & VS Code Support**: Automatically tails Cursor Composer workspaces and VS Code Copilot/Cline output channels.
 
 ### 4. 🛡️ Enterprise SecOps & Zero-Trust Defense
-- **Zero-Storage Ephemeral Auth**: Dynamic 6-digit session PIN freshly generated on server startup.
-- **Side-Channel Timing Defense**: PIN validation implemented with constant-time XOR slice comparison.
-- **Brute-Force Lockout Engine**: Tracks failed authentication attempts per client IP. 5 consecutive invalid entries trigger an instant **300-second lockout**.
-- **Instant QR Code Pairing**: High-entropy pairing token encoded into terminal ASCII QR and web pairing cards for one-tap mobile camera pairing.
+- **Zero-Trust Token Verification**: Every action endpoint (`/api/action/*`, `/api/ingest/*`) and WebSocket event stream is strictly gated behind verified Bearer tokens. Unauthenticated requests are rejected immediately.
+- **Physical Socket Peer Rate-Limiting**: Brute-force protection keys on physical TCP socket peer IP (`ConnectInfo<SocketAddr>`) to eliminate `X-Forwarded-For` spoofing bypasses. 5 consecutive invalid entries trigger an instant **300-second lockout**.
+- **Side-Channel Timing Defense**: PIN validation implemented with constant-time XOR slice comparison (`constant_time_compare`).
+- **Opt-In Shell Sandboxing**: Arbitrary shell execution (`ExecuteCommand`) is disabled by default. When explicitly enabled (`--enable-shell-commands`), commands are strictly constrained by an allowlist (`git`, `cargo`, `npm`, `pnpm`, `yarn`, `pytest`) and reject shell chaining (`&`, `;`, `|`, `` ` ``).
+- **Transport Security Clarification**: Plaintext HTTP/WS locally on trusted Wi-Fi/LAN, with end-to-end encrypted HTTPS/WSS via Cloudflare Quick Tunnels on 4G/WAN.
+- **Restricted CORS Policy**: Restricts cross-origin requests exclusively to loopback (`localhost`, `127.0.0.1`), the local LAN IP, and verified Cloudflare tunnel domains. Malicious external websites cannot pivot to localhost.
+- **Address Bar Credential Scrubbing**: Mobile client immediately removes `?pin=` and `?token=` query parameters upon authentication to prevent browser history and `Referer` leakage.
 - **Hardened HTTP Security Headers**:
   - `X-Content-Type-Options: nosniff`
   - `X-Frame-Options: DENY`
-  - Strict host-binding CORS isolation.
 
 ### 5. 📊 Workstation Telemetry & Haptic Feedback
 - **Hardware Health HUD**: Monitors workstation CPU utilization, RAM usage, and battery/power charging state in real time.

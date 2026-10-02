@@ -9,6 +9,10 @@ export function usePulseBridge() {
     const urlToken = params.get('token')
     if (urlToken) {
       localStorage.setItem('pulsebridge_token', urlToken)
+      // Immediately scrub sensitive credentials from the browser address bar
+      if (typeof window !== 'undefined' && window.history && window.history.replaceState) {
+        window.history.replaceState({}, document.title, window.location.pathname)
+      }
       return urlToken
     }
     return localStorage.getItem('pulsebridge_token')

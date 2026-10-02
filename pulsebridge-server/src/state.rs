@@ -21,11 +21,12 @@ struct StateInner {
     recent_steps: RwLock<VecDeque<ChatStep>>,
     task_start_time: Instant,
     broadcast_tx: broadcast::Sender<WsServerMessage>,
+    allow_shell_commands: bool,
 }
 
 #[allow(dead_code)]
 impl SharedState {
-    pub fn new(auth: AuthManager, port: u16) -> Self {
+    pub fn new(auth: AuthManager, port: u16, allow_shell_commands: bool) -> Self {
         let (broadcast_tx, _) = broadcast::channel(100);
         let lan_ip = auth.get_lan_ip().to_string();
         let telemetry = TelemetryCollector::new(lan_ip, port);
@@ -64,8 +65,13 @@ impl SharedState {
                 recent_steps: RwLock::new(VecDeque::with_capacity(250)),
                 task_start_time: Instant::now(),
                 broadcast_tx,
+                allow_shell_commands,
             }),
         }
+    }
+
+    pub fn is_shell_command_allowed(&self) -> bool {
+        self.inner.allow_shell_commands
     }
 
     pub fn auth(&self) -> &AuthManager {
