@@ -1,0 +1,31 @@
+[package]
+name = "pulsebridge-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.38", features = ["full"] }
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.5", features = ["cors", "fs", "trace", "set-header"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.8", features = ["v4", "serde"] }
+qrcode = "0.14"
+local-ip-address = "0.6"
+image = { version = "0.24", default-features = false, features = ["jpeg", "png"] }
+windows-sys = { version = "0.52", features = [
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Foundation",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+    "Win32_System_SystemInformation",
+    "Win32_System_Power",
+    "Win32_UI_Input_KeyboardAndMouse"
+] }
+futures-util = "0.3"
+base64 = "0.22"
+parking_lot = "0.12"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

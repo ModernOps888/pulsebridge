@@ -1,0 +1,25 @@
+{
+  "name": "pulsebridge-ide-extension",
+  "displayName": "PulseBridge: Remote Phone Companion",
+  "description": "Bi-directional bridge connecting Cursor, VS Code, and Visual Studio to your phone companion",
+  "version": "1.0.0",
+  "publisher": "pulsebridge",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "pulsebridge.openDashboard",
+        "title": "PulseBridge: Open Phone Pairing QR"
+      },
+      {
+        "command": "pulsebridge.syncNow",
+        "title": "PulseBridge: Sync Active Project State to Phone"
+      }
+    ]
+  }
+}
