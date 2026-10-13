@@ -1,146 +1,457 @@
 import { useState, useRef, useEffect, useMemo } from 'react'
 import {
   Send,
-  Sparkles,
+  Terminal,
+  Brain,
   ChevronDown,
   ChevronRight,
-  Terminal,
   User,
   Bot,
-  Folder,
-  Layers,
-  Columns,
+  Sparkles,
+  Wrench,
+  FolderGit2,
+  MessageSquare,
   Search,
-  X,
+  Check,
   Clock,
   RefreshCw,
-  PanelLeft,
-  PanelLeftClose,
-  MessageSquare,
-  Globe,
-  Laptop,
-  CheckCircle2,
-  Copy,
-  Check,
-  Plus,
+  Folder,
   FileText,
-  FolderOpen,
+  FolderTree,
+  X,
+  Copy,
+  FileCode,
+  Globe,
+  Cpu,
+  Layers,
+  Eye,
+  CheckCircle2,
+  AlertTriangle,
+  Activity,
 } from 'lucide-react'
-import type { ChatStep, ProjectChatInfo, ProjectFileEntry, ProjectStructureResponse } from '../types'
-import { hapticLight, hapticMedium, hapticSuccess } from '../utils/haptics'
+import type { ChatStep, ProjectChatInfo, ProjectFileEntry, ProjectStructureResponse, ToolCallInfo } from '../types'
 
 interface ChatStreamProps {
   steps: ChatStep[]
   projects?: ProjectChatInfo[]
-  onSendPrompt: (msg: string, targetProject?: string) => void
+  onSendPrompt: (message: string) => void
   onRefreshProjects?: (days?: number) => void
-  onLoadConversation?: (convId: string, days?: number) => Promise<any>
+  onLoadConversation?: (convId: string, days?: number) => Promise<ChatStep[]>
   onFetchProjectStructure?: (projectOrPath: string) => Promise<ProjectStructureResponse | null>
 }
 
-function extractOptions(step: ChatStep): string[] {
-  if (step.tool_calls) {
-    for (const call of step.tool_calls) {
-      if (call.tool_name === 'ask_phone' || call.tool_name === 'ask_question') {
-        try {
-          if (call.action) {
-            const parsed = JSON.parse(call.action)
-            if (Array.isArray(parsed.options) && parsed.options.length > 0) {
-              return parsed.options
-            }
-          }
-        } catch (_) {}
+type ViewMode = 'turns' | 'steps' | 'responses'
+
+interface TurnExecutionItem {
+  stepIndex: number
+  timestamp: string
+  thinking?: string
+  toolCalls: ToolCallInfo[]
+  standaloneOutput?: string
+  status: string
+}
+
+interface ChatTurn {
+  id: string
+  kind: 'user' | 'agent'
+  userStep?: ChatStep
+  agentSteps: ChatStep[]
+  executionItems: TurnExecutionItem[]
+  finalResponses: { stepIndex: number; content: string; timestamp: string }[]
+  firstStepIndex: number
+  lastStepIndex: number
+  timestamp: string
+  ide: string
+  projectName?: string
+  conversationTitle?: string
+  totalThoughts: number
+  totalToolCalls: number
+  touchedTargets: string[]
+  inputTokens?: number
+  outputTokens?: number
+  cacheReadTokens?: number
+  isRunning: boolean
+}
+
+function isUserStep(step: ChatStep): boolean {
+  return (
+    step.source === 'USER' ||
+    step.source === 'USER_EXPLICIT' ||
+    step.step_type === 'USER_INPUT'
+  )
+}
+
+function sanitizeUserText(raw?: string): string {
+  if (!raw) return ''
+  let text = raw
+  const reqStart = text.indexOf('<USER_REQUEST>')
+  const reqEnd = text.indexOf('</USER_REQUEST>')
+  if (reqStart !== -1 && reqEnd !== -1 && reqEnd > reqStart + 14) {
+    text = text.slice(reqStart + 14, reqEnd)
+  }
+  const tagsToStrip: [string, string][] = [
+    ['<CONTEXT_SUMMARY>', '</CONTEXT_SUMMARY>'],
+    ['<ADDITIONAL_METADATA>', '</ADDITIONAL_METADATA>'],
+    ['<USER_SETTINGS_CHANGE>', '</USER_SETTINGS_CHANGE>'],
+    ['<SYSTEM_MESSAGE>', '</SYSTEM_MESSAGE>'],
+    ['<EPHEMERAL_MESSAGE>', '</EPHEMERAL_MESSAGE>'],
+  ]
+  for (const [openTag, closeTag] of tagsToStrip) {
+    while (true) {
+      const s = text.indexOf(openTag)
+      if (s === -1) break
+      const e = text.indexOf(closeTag, s)
+      if (e !== -1) {
+        text = text.slice(0, s) + text.slice(e + closeTag.length)
+      } else {
+        text = text.slice(0, s)
+        break
       }
     }
   }
+  return text.trim()
+}
 
-  if (step.content) {
-    const match = step.content.match(/\[OPTIONS:\s*([^\]]+)\]/i)
-    if (match && match[1]) {
-      return match[1].split('|').map((s) => s.trim()).filter(Boolean)
+function cleanQuotedString(val?: string): string {
+  if (!val) return ''
+  const trimmed = val.trim()
+  if (trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length >= 2) {
+    try {
+      const parsed = JSON.parse(trimmed)
+      if (typeof parsed === 'string') return parsed
+    } catch (_) {
+      return trimmed.slice(1, -1)
     }
   }
-  return []
+  return trimmed
 }
 
-interface GroupedProject {
-  projectName: string
-  ide: string
-  totalSteps: number
-  lastUpdated: string
-  conversations: ProjectChatInfo[]
-  projectPath?: string
+function formatShortTarget(target?: string): string {
+  if (!target) return ''
+  const cleaned = cleanQuotedString(target)
+  const normalized = cleaned.replace(/\\/g, '/')
+  if (normalized.includes('/')) {
+    const parts = normalized.split('/')
+    return parts[parts.length - 1] || cleaned
+  }
+  return cleaned.length > 36 ? cleaned.slice(0, 33) + '...' : cleaned
 }
 
-function FileTreeView({
-  entries,
-  expandedFolders,
-  onToggleFolder,
-  depth = 0,
-}: {
-  entries: ProjectFileEntry[]
-  expandedFolders: Record<string, boolean>
-  onToggleFolder: (path: string) => void
-  depth?: number
-}) {
-  if (!entries || entries.length === 0) {
-    return (
-      <div className="text-[10px] text-gray-500 font-mono italic p-2 text-center">
-        No files found or empty folder
-      </div>
-    )
+function formatTokenCount(n?: number): string {
+  if (!n || n <= 0) return ''
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
+  return String(n)
+}
+
+function renderInlineMarkdown(text: string): React.ReactNode[] {
+  // Split by inline code `...`, bold **...**, and markdown links [label](url)
+  const tokenRegex = /(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\))/g
+  const parts = text.split(tokenRegex)
+  return parts.map((part, i) => {
+    if (part.startsWith('`') && part.endsWith('`') && part.length >= 2) {
+      return (
+        <code
+          key={i}
+          className="px-1.5 py-0.5 mx-0.5 rounded bg-emerald-950/90 border border-emerald-800/70 text-amber-300 font-mono text-[11px] break-all"
+        >
+          {part.slice(1, -1)}
+        </code>
+      )
+    }
+    if (part.startsWith('**') && part.endsWith('**') && part.length >= 4) {
+      return (
+        <strong key={i} className="font-bold text-amber-200">
+          {part.slice(2, -2)}
+        </strong>
+      )
+    }
+    const linkMatch = part.match(/^\[([^\]]+)\]\(([^)]+)\)$/)
+    if (linkMatch) {
+      const [, label, href] = linkMatch
+      const isFileLink = href.startsWith('file://')
+      return (
+        <span
+          key={i}
+          className="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded bg-amber-950/50 border border-amber-500/40 text-amber-300 font-mono text-[11px] underline decoration-amber-500/50"
+          title={href}
+        >
+          {isFileLink && <FileCode className="w-3 h-3 text-amber-400 shrink-0 inline" />}
+          {label}
+        </span>
+      )
+    }
+    return <span key={i}>{part}</span>
+  })
+}
+
+function MarkdownContent({ content }: { content: string }) {
+  const [copiedBlock, setCopiedBlock] = useState<number | null>(null)
+
+  const copyCode = (code: string, idx: number) => {
+    navigator.clipboard?.writeText(code)
+    setCopiedBlock(idx)
+    setTimeout(() => setCopiedBlock(null), 1800)
   }
 
+  // Split by fenced code blocks ```lang ... ```
+  const segments = useMemo(() => {
+    const result: { type: 'text' | 'code'; lang?: string; value: string }[] = []
+    const fenceRegex = /```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g
+    let lastIdx = 0
+    let match: RegExpExecArray | null
+    while ((match = fenceRegex.exec(content)) !== null) {
+      if (match.index > lastIdx) {
+        result.push({ type: 'text', value: content.slice(lastIdx, match.index) })
+      }
+      result.push({
+        type: 'code',
+        lang: match[1] || 'code',
+        value: match[2].replace(/\n$/, ''),
+      })
+      lastIdx = match.index + match[0].length
+    }
+    if (lastIdx < content.length) {
+      result.push({ type: 'text', value: content.slice(lastIdx) })
+    }
+    return result
+  }, [content])
+
   return (
-    <div className="space-y-0.5" style={{ paddingLeft: depth > 0 ? `${depth * 8}px` : 0 }}>
-      {entries.map((entry) => {
-        const isExpanded = expandedFolders[entry.relative_path] ?? true
-        return (
-          <div key={entry.relative_path} className="text-[10px] font-mono select-none">
-            {entry.is_dir ? (
-              <div>
+    <div className="space-y-2.5 text-xs sm:text-[13px] leading-relaxed text-gray-100">
+      {segments.map((seg, idx) => {
+        if (seg.type === 'code') {
+          return (
+            <div
+              key={idx}
+              className="rounded-xl overflow-hidden border border-emerald-900/90 bg-[#050806] shadow-inner my-2"
+            >
+              <div className="flex items-center justify-between px-3 py-1.5 bg-[#0b120e] border-b border-emerald-950 text-[10px] font-mono text-emerald-400">
+                <span className="uppercase font-bold tracking-wider text-amber-400/90">
+                  {seg.lang || 'snippet'}
+                </span>
                 <button
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    onToggleFolder(entry.relative_path)
-                  }}
-                  className="w-full flex items-center gap-1.5 py-1 px-1.5 rounded hover:bg-emerald-950/60 text-amber-300 font-semibold transition-all text-left group"
+                  type="button"
+                  onClick={() => copyCode(seg.value, idx)}
+                  className="flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-950/80 hover:bg-amber-950/80 text-emerald-300 hover:text-amber-300 border border-emerald-800/60 transition-all"
                 >
-                  {isExpanded ? (
-                    <ChevronDown className="w-3 h-3 text-amber-400 shrink-0" />
+                  {copiedBlock === idx ? (
+                    <>
+                      <Check className="w-3 h-3 text-emerald-400" />
+                      <span>Copied</span>
+                    </>
                   ) : (
-                    <ChevronRight className="w-3 h-3 text-amber-400 shrink-0" />
+                    <>
+                      <Copy className="w-3 h-3" />
+                      <span>Copy</span>
+                    </>
                   )}
-                  <FolderOpen className="w-3.5 h-3.5 text-amber-400 shrink-0 group-hover:text-amber-300" />
-                  <span className="truncate">{entry.name}</span>
                 </button>
-                {isExpanded && entry.children && entry.children.length > 0 && (
-                  <FileTreeView
-                    entries={entry.children}
-                    expandedFolders={expandedFolders}
-                    onToggleFolder={onToggleFolder}
-                    depth={depth + 1}
-                  />
-                )}
               </div>
-            ) : (
-              <div className="flex items-center justify-between py-0.5 px-1.5 rounded text-emerald-200/90 hover:text-white hover:bg-[#0c140f]">
-                <div className="flex items-center gap-1.5 truncate">
-                  <FileText className="w-3 h-3 text-emerald-500 shrink-0 ml-4" />
-                  <span className="truncate">{entry.name}</span>
+              <pre className="p-3 text-[11px] font-mono text-emerald-200 overflow-x-auto leading-relaxed whitespace-pre">
+                {seg.value}
+              </pre>
+            </div>
+          )
+        }
+
+        const lines = seg.value.split('\n')
+        const blocks: React.ReactNode[] = []
+        let i = 0
+
+        while (i < lines.length) {
+          const line = lines[i]
+          const trimmed = line.trim()
+
+          if (!trimmed) {
+            i++
+            continue
+          }
+
+          // Headings
+          if (trimmed.startsWith('#### ')) {
+            blocks.push(
+              <h5 key={i} className="text-xs font-bold text-amber-300 pt-1">
+                {renderInlineMarkdown(trimmed.slice(5))}
+              </h5>
+            )
+            i++
+            continue
+          }
+          if (trimmed.startsWith('### ')) {
+            blocks.push(
+              <h4 key={i} className="text-[13px] font-bold text-amber-300 pt-1.5 border-b border-emerald-950/80 pb-1">
+                {renderInlineMarkdown(trimmed.slice(4))}
+              </h4>
+            )
+            i++
+            continue
+          }
+          if (trimmed.startsWith('## ')) {
+            blocks.push(
+              <h3 key={i} className="text-sm font-bold text-amber-200 pt-2 border-b border-amber-500/30 pb-1">
+                {renderInlineMarkdown(trimmed.slice(3))}
+              </h3>
+            )
+            i++
+            continue
+          }
+          if (trimmed.startsWith('# ')) {
+            blocks.push(
+              <h2 key={i} className="text-base font-extrabold text-amber-200 pt-2">
+                {renderInlineMarkdown(trimmed.slice(2))}
+              </h2>
+            )
+            i++
+            continue
+          }
+
+          // Horizontal Rule
+          if (trimmed === '---' || trimmed === '***') {
+            blocks.push(<hr key={i} className="border-emerald-900/60 my-2" />)
+            i++
+            continue
+          }
+
+          // Blockquote / GitHub Alert
+          if (trimmed.startsWith('>')) {
+            const quoteLines: string[] = []
+            while (i < lines.length && lines[i].trim().startsWith('>')) {
+              quoteLines.push(lines[i].trim().replace(/^>\s?/, ''))
+              i++
+            }
+            const joined = quoteLines.join('\n')
+            const isWarning = joined.includes('[!WARNING]') || joined.includes('[!CAUTION]')
+            const isImportant = joined.includes('[!IMPORTANT]')
+            const cleanQuote = joined.replace(/^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*/i, '')
+            blocks.push(
+              <div
+                key={`q-${i}`}
+                className={`p-2.5 rounded-xl border-l-4 text-xs ${
+                  isWarning
+                    ? 'bg-rose-950/30 border-rose-500 text-rose-200'
+                    : isImportant
+                    ? 'bg-amber-950/30 border-amber-400 text-amber-100'
+                    : 'bg-emerald-950/30 border-emerald-500 text-emerald-100'
+                }`}
+              >
+                {renderInlineMarkdown(cleanQuote)}
+              </div>
+            )
+            continue
+          }
+
+          // Markdown Table
+          if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
+            const tableRows: string[][] = []
+            while (i < lines.length && lines[i].trim().startsWith('|')) {
+              const rowStr = lines[i].trim()
+              // Skip separator row |---|---|
+              if (!/^\|[\s\-:|]+\|$/.test(rowStr)) {
+                const cells = rowStr
+                  .slice(1, -1)
+                  .split('|')
+                  .map((c) => c.trim())
+                tableRows.push(cells)
+              }
+              i++
+            }
+            if (tableRows.length > 0) {
+              const header = tableRows[0]
+              const body = tableRows.slice(1)
+              blocks.push(
+                <div key={`tbl-${i}`} className="overflow-x-auto rounded-xl border border-emerald-900/80 my-1.5">
+                  <table className="w-full text-left text-[11px] border-collapse">
+                    <thead>
+                      <tr className="bg-emerald-950/80 text-amber-300 border-b border-emerald-900">
+                        {header.map((h, ci) => (
+                          <th key={ci} className="px-2.5 py-1.5 font-bold">
+                            {renderInlineMarkdown(h)}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-emerald-950/70 bg-[#070b09]">
+                      {body.map((row, ri) => (
+                        <tr key={ri} className="hover:bg-emerald-950/30">
+                          {row.map((cell, ci) => (
+                            <td key={ci} className="px-2.5 py-1.5 text-gray-200">
+                              {renderInlineMarkdown(cell)}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
-                {entry.size > 0 && (
-                  <span className="text-[8.5px] text-gray-500 shrink-0 font-mono">
-                    {entry.size > 1024 ? `${Math.round(entry.size / 1024)}KB` : `${entry.size}B`}
-                  </span>
-                )}
-              </div>
-            )}
+              )
+            }
+            continue
+          }
+
+          // Unordered or Ordered Lists
+          if (/^(\s*[-*•]|\s*\d+\.)\s+/.test(line)) {
+            const listItems: { ordered: boolean; marker: string; text: string }[] = []
+            while (i < lines.length && /^(\s*[-*•]|\s*\d+\.)\s+/.test(lines[i])) {
+              const m = lines[i].match(/^(\s*)([-*•]|\d+\.)\s+(.*)$/)
+              if (m) {
+                listItems.push({
+                  ordered: /\d+\./.test(m[2]),
+                  marker: m[2],
+                  text: m[3],
+                })
+              }
+              i++
+            }
+            blocks.push(
+              <ul key={`list-${i}`} className="space-y-1 pl-1">
+                {listItems.map((item, li) => (
+                  <li key={li} className="flex items-start gap-2">
+                    <span className="text-amber-400 font-mono text-[11px] font-bold shrink-0 mt-0.5">
+                      {item.ordered ? item.marker : '•'}
+                    </span>
+                    <span className="flex-1">{renderInlineMarkdown(item.text)}</span>
+                  </li>
+                ))}
+              </ul>
+            )
+            continue
+          }
+
+          // Standard Paragraph
+          blocks.push(
+            <p key={i} className="whitespace-pre-wrap break-words leading-relaxed">
+              {renderInlineMarkdown(line)}
+            </p>
+          )
+          i++
+        }
+
+        return (
+          <div key={idx} className="space-y-2">
+            {blocks}
           </div>
         )
       })}
     </div>
   )
+}
+
+function getToolIcon(toolName: string) {
+  const lower = toolName.toLowerCase()
+  if (lower.includes('file') || lower.includes('view') || lower.includes('replace') || lower.includes('write')) {
+    return <FileCode className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+  }
+  if (lower.includes('command') || lower.includes('task') || lower.includes('shell')) {
+    return <Terminal className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+  }
+  if (lower.includes('web') || lower.includes('url') || lower.includes('search')) {
+    return <Globe className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+  }
+  if (lower.includes('mcp') || lower.includes('chronofact') || lower.includes('spine')) {
+    return <Cpu className="w-3.5 h-3.5 text-purple-400 shrink-0" />
+  }
+  return <Wrench className="w-3.5 h-3.5 text-amber-400 shrink-0" />
 }
 
 export function ChatStream({
@@ -151,1100 +462,1038 @@ export function ChatStream({
   onLoadConversation,
   onFetchProjectStructure,
 }: ChatStreamProps) {
-  const [inputMessage, setInputMessage] = useState('')
-  const [expandedThinking, setExpandedThinking] = useState<Record<string, boolean>>({})
-  const [selectedProject, setSelectedProject] = useState<string>('all')
-  const [selectedConversation, setSelectedConversation] = useState<string>('all')
-  const [searchQuery, setSearchQuery] = useState('')
-  const [isSidePanelOpen, setIsSidePanelOpen] = useState(false)
-  const [isSplitView, setIsSplitView] = useState(false)
-  const [isSearchVisible, setIsSearchVisible] = useState(false)
-  const [sidePanelFilter, setSidePanelFilter] = useState('')
+  const [promptInput, setPromptInput] = useState('')
+  const [viewMode, setViewMode] = useState<ViewMode>('turns')
+  const [expandedTurns, setExpandedTurns] = useState<Record<string, boolean>>({})
+  const [expandedThoughts, setExpandedThoughts] = useState<Record<string, boolean>>({})
+  const [expandedTools, setExpandedTools] = useState<Record<string, boolean>>({})
   const [copiedId, setCopiedId] = useState<string | null>(null)
-
-  // Project Folder Structure & On-Demand History States
-  const [projectTabs, setProjectTabs] = useState<Record<string, 'chats' | 'structure'>>({})
-  const [structureData, setStructureData] = useState<Record<string, ProjectFileEntry[]>>({})
-  const [structureLoading, setStructureLoading] = useState<Record<string, boolean>>({})
-  const [expandedFolders, setExpandedFolders] = useState<Record<string, boolean>>({})
+  const [selectedProjectId, setSelectedProjectId] = useState<string>('ALL')
+  const [showProjectDrawer, setShowProjectDrawer] = useState<boolean>(false)
+  const [projectSearch, setProjectSearch] = useState<string>('')
   const [loadingConvId, setLoadingConvId] = useState<string | null>(null)
-  // 7-30 days recency filter per user request
-  const [timeFilterDays, setTimeFilterDays] = useState<number>(30)
+  const [historyDays, setHistoryDays] = useState<number>(30)
+  const [showFolderModal, setShowFolderModal] = useState<boolean>(false)
+  const [folderStructure, setFolderStructure] = useState<ProjectStructureResponse | null>(null)
+  const [loadingFolder, setLoadingFolder] = useState<boolean>(false)
+  const [expandedDirs, setExpandedDirs] = useState<Record<string, boolean>>({})
+  const bottomRef = useRef<HTMLDivElement | null>(null)
 
-  const chatEndRef = useRef<HTMLDivElement | null>(null)
-
-  const toggleFolder = (folderPath: string) => {
-    hapticLight()
-    setExpandedFolders((prev) => ({
-      ...prev,
-      [folderPath]: prev[folderPath] !== undefined ? !prev[folderPath] : false,
-    }))
+  const openProjectFolderExplorer = async () => {
+    if (!onFetchProjectStructure) return
+    setShowFolderModal(true)
+    setLoadingFolder(true)
+    const activeProj = projects.find((p) => p.id === selectedProjectId)
+    const targetQuery =
+      activeProj?.project_path ||
+      activeProj?.project_name ||
+      (selectedProjectId !== 'ALL' ? selectedProjectId : 'PulseBridge')
+    const res = await onFetchProjectStructure(targetQuery)
+    setFolderStructure(res)
+    setLoadingFolder(false)
   }
 
-  const handleToggleStructureTab = async (group: GroupedProject, tab: 'chats' | 'structure') => {
-    hapticLight()
-    setProjectTabs((prev) => ({ ...prev, [group.projectName]: tab }))
+  const toggleDir = (relPath: string) => {
+    setExpandedDirs((prev) => ({ ...prev, [relPath]: !prev[relPath] }))
+  }
 
-    if (tab === 'structure' && !structureData[group.projectName] && onFetchProjectStructure) {
-      setStructureLoading((prev) => ({ ...prev, [group.projectName]: true }))
-      try {
-        const query = group.projectPath || group.projectName
-        const res = await onFetchProjectStructure(query)
-        if (res && res.entries) {
-          setStructureData((prev) => ({ ...prev, [group.projectName]: res.entries }))
+  // Filter projects by search query
+  const filteredProjects = useMemo(() => {
+    if (!projectSearch.trim()) return projects
+    const q = projectSearch.toLowerCase()
+    return projects.filter(
+      (p) =>
+        p.project_name.toLowerCase().includes(q) ||
+        p.conversation_title.toLowerCase().includes(q) ||
+        p.ide.toLowerCase().includes(q) ||
+        (p.latest_message_snippet && p.latest_message_snippet.toLowerCase().includes(q))
+    )
+  }, [projects, projectSearch])
+
+  // Filter steps by selected project/conversation
+  const displayedSteps = useMemo(() => {
+    let base = steps
+    if (selectedProjectId !== 'ALL') {
+      const targetProj = projects.find((p) => p.id === selectedProjectId)
+      base = steps.filter((s) => {
+        if (s.conversation_id && s.conversation_id === selectedProjectId) return true
+        if (
+          targetProj &&
+          s.project_name &&
+          s.project_name.toLowerCase() === targetProj.project_name.toLowerCase()
+        ) {
+          return true
         }
-      } catch (err) {
-        console.error('Failed to load project structure', err)
-      } finally {
-        setStructureLoading((prev) => ({ ...prev, [group.projectName]: false }))
-      }
-    }
-  }
-
-  const handleSelectConversation = async (projectName: string, convId: string) => {
-    selectProjectAndChat(projectName, convId)
-    if (onLoadConversation && convId !== 'all' && convId !== 'active') {
-      setLoadingConvId(convId)
-      try {
-        await onLoadConversation(convId, timeFilterDays)
-      } catch (err) {
-        console.error('Failed to load conversation history', err)
-      } finally {
-        setLoadingConvId(null)
-      }
-    }
-  }
-
-  const handleStartNewChat = (projectName: string) => {
-    hapticSuccess()
-    setSelectedProject(projectName)
-    setSelectedConversation('all')
-    setInputMessage('')
-    if (!isSplitView) {
-      setIsSidePanelOpen(false)
-    }
-  }
-
-  // Aggregate project names and step counts
-  const projectStats = useMemo(() => {
-    const map = new Map<string, { count: number; ide: string; latestSnippet?: string; lastTime?: string }>()
-
-    for (const step of steps) {
-      const pName = step.project_name || 'PulseBridge'
-      const existing = map.get(pName) || {
-        count: 0,
-        ide: step.ide || 'antigravity',
-        latestSnippet: step.content || step.thinking,
-        lastTime: step.timestamp,
-      }
-      existing.count += 1
-      if (step.content || step.thinking) {
-        existing.latestSnippet = step.content || step.thinking
-      }
-      existing.lastTime = step.timestamp || existing.lastTime
-      map.set(pName, existing)
-    }
-
-    // Incorporate server-reported projects
-    for (const p of projects) {
-      if (!map.has(p.project_name)) {
-        map.set(p.project_name, {
-          count: p.step_count || 0,
-          ide: p.ide || 'antigravity',
-          latestSnippet: p.latest_message_snippet,
-          lastTime: p.last_updated,
-        })
-      }
-    }
-
-    return Array.from(map.entries()).map(([name, data]) => ({
-      name,
-      count: data.count,
-      ide: data.ide,
-      latestSnippet: data.latestSnippet,
-      lastTime: data.lastTime,
-    }))
-  }, [steps, projects])
-
-  // Group conversations hierarchically by project (Top 6 projects, up to 6 chats each)
-  const groupedProjects = useMemo<GroupedProject[]>(() => {
-    const map = new Map<string, GroupedProject>()
-
-    for (const p of projects) {
-      const key = p.project_name || 'PulseBridge'
-      const existing = map.get(key) || {
-        projectName: key,
-        ide: p.ide || 'antigravity',
-        totalSteps: 0,
-        lastUpdated: p.last_updated,
-        conversations: [],
-        projectPath: p.project_path,
-      }
-      existing.totalSteps += p.step_count || 0
-      if (!existing.conversations.some((c) => c.id === p.id)) {
-        existing.conversations.push(p)
-      }
-      if (p.project_path && !existing.projectPath) {
-        existing.projectPath = p.project_path
-      }
-      if (new Date(p.last_updated) > new Date(existing.lastUpdated || 0)) {
-        existing.lastUpdated = p.last_updated
-      }
-      map.set(key, existing)
-    }
-
-    // Include any active conversations discovered in live chat steps
-    for (const s of steps) {
-      const key = s.project_name || 'PulseBridge'
-      const group = map.get(key)
-      if (!group) {
-        map.set(key, {
-          projectName: key,
-          ide: s.ide || 'antigravity',
-          totalSteps: 1,
-          lastUpdated: s.timestamp,
-          conversations: [
-            {
-              id: s.conversation_id || 'active',
-              project_name: key,
-              conversation_title: s.conversation_title || `${key} Active Session`,
-              ide: s.ide || 'antigravity',
-              last_updated: s.timestamp,
-              step_count: 1,
-              latest_message_snippet: s.content || s.thinking,
-              status: 'active',
-            },
-          ],
-        })
-      } else {
-        const convId = s.conversation_id || 'active'
-        if (!group.conversations.some((c) => c.id === convId)) {
-          group.conversations.push({
-            id: convId,
-            project_name: key,
-            conversation_title: s.conversation_title || `${key} Session`,
-            ide: s.ide || 'antigravity',
-            last_updated: s.timestamp,
-            step_count: 1,
-            latest_message_snippet: s.content || s.thinking,
-            status: 'active',
-          })
-        }
-      }
-    }
-
-    // Filter conversations to only those active within timeFilterDays
-    const cutoffTime = Date.now() - timeFilterDays * 24 * 60 * 60 * 1000
-    for (const group of map.values()) {
-      group.conversations = group.conversations
-        .filter((c) => {
-          if (!c.last_updated) return true
-          const t = new Date(c.last_updated).getTime()
-          return isNaN(t) || t >= cutoffTime
-        })
-        .sort((a, b) => new Date(b.last_updated || 0).getTime() - new Date(a.last_updated || 0).getTime())
-    }
-
-    // Sort by recency, filter to active within time window, and return top 6 projects
-    return Array.from(map.values())
-      .filter((g) => {
-        const t = g.lastUpdated ? new Date(g.lastUpdated).getTime() : 0
-        const isRecent = !isNaN(t) && t >= cutoffTime
-        return isRecent && g.conversations.length > 0
+        return false
       })
-      .sort((a, b) => new Date(b.lastUpdated || 0).getTime() - new Date(a.lastUpdated || 0).getTime())
-      .slice(0, 6)
-  }, [projects, steps, timeFilterDays])
-
-  // Active selected conversation object (if any)
-  const activeConversation = useMemo(() => {
-    if (selectedConversation === 'all') return null
-    for (const group of groupedProjects) {
-      const found = group.conversations.find((c) => c.id === selectedConversation)
-      if (found) return found
     }
-    return null
-  }, [groupedProjects, selectedConversation])
-
-  // Filter steps based on selected project, conversation, search query, and 7-30d recency
-  const filteredSteps = useMemo(() => {
-    const cutoffTime = Date.now() - timeFilterDays * 24 * 60 * 60 * 1000
-
-    return steps.filter((step) => {
-      // Enforce 7-30d recency on chat history and preview
-      if (step.timestamp) {
-        const stepTime = new Date(step.timestamp).getTime()
-        if (!isNaN(stepTime) && stepTime < cutoffTime) {
-          return false
-        }
-      }
-
-      const stepProject = step.project_name || 'PulseBridge'
-
-      if (selectedProject !== 'all' && stepProject.toLowerCase() !== selectedProject.toLowerCase()) {
-        return false
-      }
-
-      if (selectedConversation !== 'all' && step.conversation_id && step.conversation_id !== selectedConversation) {
-        return false
-      }
-
-      if (searchQuery.trim()) {
-        const query = searchQuery.toLowerCase()
-        const matchContent = step.content?.toLowerCase().includes(query)
-        const matchThinking = step.thinking?.toLowerCase().includes(query)
-        const matchTool = step.tool_calls?.some(
-          (t) =>
-            t.tool_name.toLowerCase().includes(query) ||
-            t.action.toLowerCase().includes(query) ||
-            t.summary.toLowerCase().includes(query)
-        )
-        const matchProject = step.project_name?.toLowerCase().includes(query)
-        if (!matchContent && !matchThinking && !matchTool && !matchProject) {
-          return false
-        }
-      }
-
+    // Filter out empty noise steps
+    return base.filter((s) => {
+      if (s.step_type === 'CHECKPOINT' || s.step_type === 'SYSTEM_MESSAGE') return false
       return true
     })
-  }, [steps, selectedProject, selectedConversation, searchQuery, timeFilterDays])
+  }, [steps, selectedProjectId, projects])
+
+  // Group steps into Antigravity Turns (User Prompt -> Collapsible Agent Thought/Tool Pipeline -> Final Agent Response)
+  const chatTurns = useMemo<ChatTurn[]>(() => {
+    const turns: ChatTurn[] = []
+    let currentAgentTurn: ChatTurn | null = null
+
+    for (const step of displayedSteps) {
+      if (isUserStep(step)) {
+        const cleanText = sanitizeUserText(step.content)
+        if (!cleanText) continue
+
+        if (currentAgentTurn) {
+          turns.push(currentAgentTurn)
+          currentAgentTurn = null
+        }
+
+        turns.push({
+          id: `user-${step.id}`,
+          kind: 'user',
+          userStep: { ...step, content: cleanText },
+          agentSteps: [],
+          executionItems: [],
+          finalResponses: [],
+          firstStepIndex: step.step_index,
+          lastStepIndex: step.step_index,
+          timestamp: step.timestamp,
+          ide: step.ide,
+          projectName: step.project_name,
+          conversationTitle: step.conversation_title,
+          totalThoughts: 0,
+          totalToolCalls: 0,
+          touchedTargets: [],
+          isRunning: false,
+        })
+      } else {
+        if (!currentAgentTurn) {
+          currentAgentTurn = {
+            id: `agent-turn-${step.id}`,
+            kind: 'agent',
+            agentSteps: [],
+            executionItems: [],
+            finalResponses: [],
+            firstStepIndex: step.step_index,
+            lastStepIndex: step.step_index,
+            timestamp: step.timestamp,
+            ide: step.ide,
+            projectName: step.project_name,
+            conversationTitle: step.conversation_title,
+            totalThoughts: 0,
+            totalToolCalls: 0,
+            touchedTargets: [],
+            isRunning: false,
+          }
+        }
+
+        currentAgentTurn.agentSteps.push(step)
+        currentAgentTurn.lastStepIndex = step.step_index
+        currentAgentTurn.timestamp = step.timestamp
+        if (step.project_name) currentAgentTurn.projectName = step.project_name
+        if (step.conversation_title) currentAgentTurn.conversationTitle = step.conversation_title
+        if (step.input_tokens) currentAgentTurn.inputTokens = step.input_tokens
+        if (step.output_tokens) {
+          currentAgentTurn.outputTokens = (currentAgentTurn.outputTokens || 0) + step.output_tokens
+        }
+        if (step.cache_read_tokens) currentAgentTurn.cacheReadTokens = step.cache_read_tokens
+
+        const cleanedCalls: ToolCallInfo[] = (step.tool_calls || []).map((tc) => ({
+          ...tc,
+          action: cleanQuotedString(tc.action),
+          summary: cleanQuotedString(tc.summary),
+          target_file: tc.target_file ? cleanQuotedString(tc.target_file) : undefined,
+        }))
+
+        if (step.thinking) {
+          currentAgentTurn.totalThoughts += 1
+        }
+        if (cleanedCalls.length > 0) {
+          currentAgentTurn.totalToolCalls += cleanedCalls.length
+          for (const tc of cleanedCalls) {
+            if (tc.target_file) {
+              const shortTarget = formatShortTarget(tc.target_file)
+              if (shortTarget && !currentAgentTurn.touchedTargets.includes(shortTarget)) {
+                currentAgentTurn.touchedTargets.push(shortTarget)
+              }
+            }
+          }
+        }
+
+        if (step.step_type === 'TOOL_OUTPUT') {
+          // If an unpaired tool output arrived, attach to the last execution item's pending tool call if possible
+          let attached = false
+          for (let i = currentAgentTurn.executionItems.length - 1; i >= 0; i--) {
+            const item = currentAgentTurn.executionItems[i]
+            const pending = item.toolCalls.find((t) => !t.output)
+            if (pending && step.content) {
+              pending.output = step.content
+              attached = true
+              break
+            }
+          }
+          if (!attached && step.content) {
+            currentAgentTurn.executionItems.push({
+              stepIndex: step.step_index,
+              timestamp: step.timestamp,
+              toolCalls: [],
+              standaloneOutput: step.content,
+              status: step.status,
+            })
+          }
+        } else {
+          if (step.thinking || cleanedCalls.length > 0) {
+            currentAgentTurn.executionItems.push({
+              stepIndex: step.step_index,
+              timestamp: step.timestamp,
+              thinking: step.thinking,
+              toolCalls: cleanedCalls,
+              status: step.status,
+            })
+          }
+          if (step.content && step.content.trim()) {
+            currentAgentTurn.finalResponses.push({
+              stepIndex: step.step_index,
+              content: step.content.trim(),
+              timestamp: step.timestamp,
+            })
+          }
+        }
+      }
+    }
+
+    if (currentAgentTurn) {
+      // Check if the final turn is still actively executing tools without a final response
+      const lastStep = currentAgentTurn.agentSteps[currentAgentTurn.agentSteps.length - 1]
+      if (
+        currentAgentTurn.finalResponses.length === 0 ||
+        (lastStep && lastStep.tool_calls && lastStep.tool_calls.length > 0 && !lastStep.content)
+      ) {
+        currentAgentTurn.isRunning = true
+      }
+      turns.push(currentAgentTurn)
+    }
+
+    return turns
+  }, [displayedSteps])
+
+  const activeProjectInfo = useMemo(() => {
+    if (selectedProjectId === 'ALL') return null
+    return projects.find((p) => p.id === selectedProjectId) || null
+  }, [projects, selectedProjectId])
 
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [filteredSteps.length])
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [displayedSteps.length])
 
-  const toggleThinking = (id: string) => {
-    hapticLight()
-    setExpandedThinking((prev) => ({ ...prev, [id]: !prev[id] }))
+  const toggleTurnPipeline = (turnId: string) => {
+    setExpandedTurns((prev) => ({ ...prev, [turnId]: !prev[turnId] }))
   }
 
-  const handleSend = () => {
-    if (!inputMessage.trim()) return
-    hapticSuccess()
-    const target = selectedProject !== 'all' ? selectedProject : undefined
-    onSendPrompt(inputMessage.trim(), target)
-    setInputMessage('')
+  const toggleThought = (key: string) => {
+    setExpandedThoughts((prev) => ({ ...prev, [key]: !prev[key] }))
   }
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      handleSend()
-    }
+  const toggleToolOutput = (key: string) => {
+    setExpandedTools((prev) => ({ ...prev, [key]: !prev[key] }))
   }
 
-  const selectProjectAndChat = (projectName: string, conversationId: string = 'all') => {
-    hapticMedium()
-    setSelectedProject(projectName)
-    setSelectedConversation(conversationId)
-    if (!isSplitView) {
-      setIsSidePanelOpen(false)
-    }
-  }
-
-  const copyText = (id: string, text: string) => {
-    hapticSuccess()
-    navigator.clipboard.writeText(text)
+  const copyText = (text: string, id: string) => {
+    navigator.clipboard?.writeText(text)
     setCopiedId(id)
-    setTimeout(() => setCopiedId(null), 2000)
+    setTimeout(() => setCopiedId(null), 1800)
+  }
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!promptInput.trim()) return
+    onSendPrompt(promptInput.trim())
+    setPromptInput('')
   }
 
   const quickReplies = [
-    'Proceed with next step',
-    'Looks good, continue',
+    'Proceed with the plan',
     'Run tests & verify',
-    'Emergency abort',
+    'Fix any build errors',
+    'Summarize changes',
+    'Commit & push',
   ]
 
-  const getProjectIcon = (name: string) => {
-    const lower = name.toLowerCase()
-    if (lower.includes('infinity')) return Globe
-    if (lower.includes('cursor')) return Laptop
-    return Folder
+  const renderFileTree = (entries: ProjectFileEntry[], level = 0) => {
+    return entries.map((entry) => {
+      const isExpanded = !!expandedDirs[entry.relative_path]
+      return (
+        <div key={entry.relative_path} style={{ paddingLeft: level > 0 ? '12px' : '0px' }}>
+          <div
+            onClick={() => entry.is_dir && toggleDir(entry.relative_path)}
+            className={`flex items-center justify-between py-1.5 px-2 rounded-lg text-xs font-mono transition-all ${
+              entry.is_dir
+                ? 'cursor-pointer hover:bg-emerald-950/60 text-amber-300 font-semibold'
+                : 'text-emerald-200/90 hover:bg-emerald-950/30'
+            }`}
+          >
+            <div className="flex items-center gap-2 truncate">
+              {entry.is_dir ? (
+                <>
+                  {isExpanded ? (
+                    <ChevronDown className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                  ) : (
+                    <ChevronRight className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                  )}
+                  <Folder className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                </>
+              ) : (
+                <>
+                  <span className="w-3.5 shrink-0" />
+                  <FileText className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                </>
+              )}
+              <span className="truncate">{entry.name}</span>
+            </div>
+            {!entry.is_dir && (
+              <span className="text-[9px] text-emerald-600 shrink-0 ml-2">
+                {entry.size > 1024 ? `${(entry.size / 1024).toFixed(1)} KB` : `${entry.size} B`}
+              </span>
+            )}
+          </div>
+          {entry.is_dir && isExpanded && entry.children && entry.children.length > 0 && (
+            <div className="border-l border-emerald-900/60 ml-3 mt-0.5 space-y-0.5">
+              {renderFileTree(entry.children, level + 1)}
+            </div>
+          )}
+        </div>
+      )
+    })
   }
 
   return (
-    <div
-      className={`flex flex-col h-[calc(100dvh-125px)] w-full mx-auto transition-all ${
-        isSplitView ? 'max-w-6xl px-1' : 'max-w-5xl px-1 sm:px-2'
-      }`}
-    >
-      {/* Top Antigravity Header & Toolbar (Optimized for Pixel 9 Pro) */}
-      <div className="bg-[#0a0f0d] border border-emerald-950/80 rounded-2xl p-2 sm:p-2.5 mb-1.5 shadow-xl shrink-0">
-        <div className="flex items-center justify-between gap-1.5">
-          {/* Left: Side Panel Toggle & Active Breadcrumbs */}
-          <div className="flex items-center gap-1.5 min-w-0">
-            <button
-              onClick={() => {
-                hapticMedium()
-                setIsSidePanelOpen((prev) => !prev)
-              }}
-              className={`p-1.5 sm:px-2.5 sm:py-1 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm shrink-0 touch-manipulation active:scale-95 ${
-                isSidePanelOpen
-                  ? 'bg-amber-500 text-black border-amber-400 ring-1 ring-amber-400/50 shadow-[0_0_12px_rgba(251,191,36,0.3)]'
-                  : 'bg-[#101813] text-amber-300 border-amber-500/40 hover:bg-amber-950/40'
-              }`}
-              title="Toggle Antigravity Side Panel (Workspaces & Chats)"
-            >
-              {isSidePanelOpen ? (
-                <PanelLeftClose className="w-4 h-4 text-black" />
-              ) : (
-                <PanelLeft className="w-4 h-4 text-amber-400" />
-              )}
-              <span className="hidden xs:inline text-[11px] font-mono">Workspaces</span>
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            </button>
-
-            {/* Breadcrumb Indicators */}
-            <div className="flex items-center gap-1 text-[11px] font-mono min-w-0">
-              <button
-                onClick={() => selectProjectAndChat('all', 'all')}
-                className={`px-2 py-0.5 rounded-lg border font-semibold flex items-center gap-1 truncate transition-all active:scale-95 ${
-                  selectedProject === 'all'
-                    ? 'bg-amber-950/60 border-amber-500/60 text-amber-300 shadow-sm'
-                    : 'bg-[#0d140f] border-emerald-950 text-emerald-400 hover:text-emerald-200'
-                }`}
-                title="Active Project"
-              >
-                <Layers className="w-3 h-3 text-amber-400 shrink-0" />
-                <span className="truncate max-w-[95px] sm:max-w-[140px]">
-                  {selectedProject === 'all' ? 'All Projects' : selectedProject}
-                </span>
-              </button>
-
-              {activeConversation && (
-                <div className="flex items-center gap-1 bg-amber-950/40 border border-amber-500/50 px-2 py-0.5 rounded-lg text-[10px] text-amber-200 min-w-0">
-                  <span className="opacity-50">›</span>
-                  <span className="font-semibold truncate max-w-[85px] sm:max-w-[130px]">
-                    {activeConversation.conversation_title}
+    <div className="flex flex-col h-[calc(100vh-8.5rem)] max-w-4xl mx-auto">
+      {/* Top Multi-Project & View Mode Selector Bar */}
+      <div className="px-3 pt-2.5 pb-1.5 bg-[#060907]/95 backdrop-blur-md border-b border-emerald-950/80 z-20 space-y-2">
+        <div className="flex items-center justify-between gap-2">
+          <button
+            onClick={() => {
+              const nextState = !showProjectDrawer
+              setShowProjectDrawer(nextState)
+              if (nextState && onRefreshProjects) {
+                onRefreshProjects()
+              }
+            }}
+            className="flex-1 flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-[#0a0f0c] border border-amber-500/40 hover:border-amber-400 text-left transition-all shadow-sm min-w-0"
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              <div className="w-7 h-7 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0">
+                <FolderGit2 className="w-4 h-4" />
+              </div>
+              <div className="truncate">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[11px] font-bold text-amber-200 truncate">
+                    {activeProjectInfo ? activeProjectInfo.project_name : 'All Active IDE Projects'}
                   </span>
-                  <button
-                    onClick={() => {
-                      hapticLight()
-                      setSelectedConversation('all')
-                    }}
-                    className="p-0.5 hover:bg-amber-800 rounded shrink-0"
-                    title="View all chats in this project"
-                  >
-                    <X className="w-2.5 h-2.5" />
-                  </button>
+                  <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-emerald-950 text-emerald-300 border border-emerald-800/60">
+                    {activeProjectInfo ? activeProjectInfo.ide.toUpperCase() : `${projects.length} Chats`}
+                  </span>
                 </div>
-              )}
+                <p className="text-[10px] text-emerald-400/80 truncate font-mono">
+                  {activeProjectInfo
+                    ? activeProjectInfo.conversation_title
+                    : 'Antigravity IDE Structured Stream'}
+                </p>
+              </div>
             </div>
-          </div>
 
-          {/* Right: Quick Action Icons */}
-          <div className="flex items-center gap-1 shrink-0">
+            <div className="flex items-center gap-1 text-[10px] font-mono text-amber-300 shrink-0 bg-amber-950/50 px-2 py-1 rounded-lg border border-amber-500/30">
+              <MessageSquare className="w-3 h-3 text-amber-400" />
+              <span className="hidden sm:inline">Chats</span>
+              <ChevronDown
+                className={`w-3.5 h-3.5 transition-transform ${showProjectDrawer ? 'rotate-180' : ''}`}
+              />
+            </div>
+          </button>
+
+          {/* View Project Folder Structure Button */}
+          {onFetchProjectStructure && (
             <button
-              onClick={() => {
-                hapticLight()
-                setIsSearchVisible((prev) => !prev)
-              }}
-              className={`p-1.5 rounded-xl border text-xs font-semibold transition-all active:scale-95 ${
-                isSearchVisible || searchQuery
-                  ? 'bg-amber-500 text-black border-amber-400'
-                  : 'bg-[#101813] text-emerald-300 border-emerald-900/60 hover:bg-[#15221b]'
-              }`}
-              title="Search Reasoning, Code & Tools"
+              onClick={openProjectFolderExplorer}
+              className="px-3 py-2 rounded-xl bg-[#0a0f0c] border border-emerald-800/70 hover:border-amber-400 text-emerald-300 hover:text-amber-300 text-xs font-mono font-bold flex items-center gap-1.5 shrink-0 shadow-sm transition-all"
+              title="Inspect Project Directory Tree"
             >
-              <Search className="w-3.5 h-3.5" />
+              <FolderTree className="w-4 h-4 text-amber-400" />
+              <span className="hidden sm:inline">Files</span>
             </button>
-
-            <button
-              onClick={() => {
-                hapticLight()
-                setIsSplitView((prev) => !prev)
-              }}
-              className={`p-1.5 rounded-xl border text-xs font-semibold transition-all hidden md:flex items-center gap-1 active:scale-95 ${
-                isSplitView
-                  ? 'bg-emerald-500 text-black border-emerald-400 font-bold'
-                  : 'bg-[#101813] text-emerald-300 border-emerald-800 hover:bg-emerald-950/40'
-              }`}
-              title="Toggle Antigravity Split-Window View"
-            >
-              <Columns className="w-3.5 h-3.5" />
-              <span className="text-[10px]">Split</span>
-            </button>
-
-            {onRefreshProjects && (
-              <button
-                onClick={() => {
-                  hapticLight()
-                  onRefreshProjects()
-                }}
-                className="p-1.5 rounded-xl bg-[#101813] border border-emerald-900/60 text-emerald-300 hover:text-white active:scale-95 transition-all"
-                title="Refresh project list"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-              </button>
-            )}
-          </div>
+          )}
         </div>
 
-        {/* Search Bar Drawer */}
-        {isSearchVisible && (
-          <div className="relative pt-1.5 mt-1.5 border-t border-emerald-950/80 animate-fadeIn">
-            <Search className="w-3 h-3 absolute left-2.5 top-3.5 text-emerald-600" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search reasoning, tools, and code across chats..."
-              className="w-full bg-[#070c09] border border-emerald-950 rounded-xl pl-8 pr-7 py-1 text-[11px] text-emerald-100 placeholder-emerald-800 focus:outline-none focus:border-amber-500/60 font-mono"
-              autoFocus
-            />
-            {searchQuery && (
+        {/* Antigravity Breakdown Mode Switcher */}
+        <div className="flex items-center justify-between gap-2 pt-0.5">
+          <div className="flex items-center gap-1 bg-[#0a0f0c] p-1 rounded-xl border border-emerald-950">
+            <button
+              type="button"
+              onClick={() => setViewMode('turns')}
+              className={`px-2.5 py-1 rounded-lg text-[10px] font-mono font-bold flex items-center gap-1 transition-all ${
+                viewMode === 'turns'
+                  ? 'bg-gradient-to-r from-amber-500 to-yellow-400 text-black shadow-sm'
+                  : 'text-emerald-400/80 hover:text-amber-200'
+              }`}
+            >
+              <Layers className="w-3 h-3" />
+              <span>Antigravity Turns ({chatTurns.length})</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewMode('responses')}
+              className={`px-2.5 py-1 rounded-lg text-[10px] font-mono font-bold flex items-center gap-1 transition-all ${
+                viewMode === 'responses'
+                  ? 'bg-gradient-to-r from-amber-500 to-yellow-400 text-black shadow-sm'
+                  : 'text-emerald-400/80 hover:text-amber-200'
+              }`}
+            >
+              <Eye className="w-3 h-3" />
+              <span>Clean Chat</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewMode('steps')}
+              className={`px-2.5 py-1 rounded-lg text-[10px] font-mono font-bold flex items-center gap-1 transition-all ${
+                viewMode === 'steps'
+                  ? 'bg-gradient-to-r from-amber-500 to-yellow-400 text-black shadow-sm'
+                  : 'text-emerald-400/80 hover:text-amber-200'
+              }`}
+            >
+              <Activity className="w-3 h-3" />
+              <span>Raw Steps ({displayedSteps.length})</span>
+            </button>
+          </div>
+
+          <span className="text-[9px] font-mono text-emerald-500/80 hidden sm:inline">
+            Live Transcript Sync
+          </span>
+        </div>
+
+        {/* Collapsible Project & Chat Switcher Drawer */}
+        {showProjectDrawer && (
+          <div className="mt-2 rounded-2xl bg-[#0a0f0c] border border-amber-500/50 p-3 shadow-2xl space-y-2.5 animate-slideDown max-h-80 flex flex-col">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-mono uppercase tracking-wider text-amber-400 font-bold flex items-center gap-1.5">
+                <FolderGit2 className="w-3.5 h-3.5" /> Active Chats (Last {historyDays} Days) ({projects.length})
+              </span>
+              <div className="flex items-center gap-1.5">
+                {historyDays === 30 && onRefreshProjects && (
+                  <button
+                    onClick={() => {
+                      setHistoryDays(3650)
+                      onRefreshProjects(3650)
+                    }}
+                    className="text-[9px] font-mono text-amber-300 hover:text-amber-200 px-2 py-0.5 rounded bg-amber-950/60 border border-amber-500/40"
+                  >
+                    Load All History
+                  </button>
+                )}
+                {onRefreshProjects && (
+                  <button
+                    onClick={() => onRefreshProjects(historyDays)}
+                    className="text-[10px] font-mono text-emerald-300 hover:text-amber-300 flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-950/60 border border-emerald-800/60"
+                  >
+                    <RefreshCw className="w-2.5 h-2.5" /> Refresh
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-emerald-500 absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={projectSearch}
+                onChange={(e) => setProjectSearch(e.target.value)}
+                placeholder="Search project, folder, or chat topic..."
+                className="w-full bg-[#060907] border border-emerald-900/80 rounded-xl pl-8 pr-3 py-1.5 text-xs text-amber-100 placeholder-emerald-600/60 focus:outline-none focus:border-amber-400 font-mono"
+              />
+            </div>
+
+            <div className="overflow-y-auto space-y-1.5 pr-1 max-h-52">
               <button
                 onClick={() => {
-                  hapticLight()
-                  setSearchQuery('')
+                  setSelectedProjectId('ALL')
+                  setShowProjectDrawer(false)
                 }}
-                className="absolute right-2.5 top-3 text-gray-500 hover:text-gray-300"
+                className={`w-full p-2.5 rounded-xl border text-left flex items-center justify-between transition-all ${
+                  selectedProjectId === 'ALL'
+                    ? 'bg-amber-950/50 border-amber-400 text-amber-200'
+                    : 'bg-[#0d140f]/70 border-emerald-950 hover:border-emerald-800 text-gray-300'
+                }`}
               >
-                <X className="w-3 h-3" />
+                <div>
+                  <div className="text-xs font-bold flex items-center gap-1.5">
+                    <span>All Projects & Conversations</span>
+                    <span className="text-[9px] font-mono bg-emerald-950 text-emerald-300 px-1.5 py-0.2 rounded">
+                      Unified
+                    </span>
+                  </div>
+                  <div className="text-[10px] text-emerald-500/80 font-mono">
+                     Combined live stream ({steps.length} steps cached)
+                  </div>
+                </div>
+                {selectedProjectId === 'ALL' && <Check className="w-4 h-4 text-amber-400 shrink-0" />}
               </button>
-            )}
+
+              {filteredProjects.map((proj) => {
+                const isSelected = selectedProjectId === proj.id
+                return (
+                  <button
+                    key={proj.id}
+                    onClick={async () => {
+                      setSelectedProjectId(proj.id)
+                      setShowProjectDrawer(false)
+                      if (onLoadConversation) {
+                        setLoadingConvId(proj.id)
+                        await onLoadConversation(proj.id, historyDays)
+                        setLoadingConvId(null)
+                      }
+                    }}
+                    className={`w-full p-2.5 rounded-xl border text-left flex items-center justify-between gap-2 transition-all ${
+                      isSelected
+                        ? 'bg-amber-950/50 border-amber-400 text-amber-100 shadow-md'
+                        : 'bg-[#0d140f]/70 border-emerald-950 hover:border-emerald-800 text-gray-200'
+                    }`}
+                  >
+                    <div className="min-w-0 flex-1 space-y-0.5">
+                      <div className="flex items-center gap-1.5">
+                        <span
+                          className={`text-[8px] font-mono font-bold px-1.5 py-0.2 rounded uppercase border ${
+                            proj.ide === 'antigravity'
+                              ? 'bg-emerald-950 border-emerald-700 text-emerald-300'
+                              : proj.ide === 'cursor'
+                              ? 'bg-amber-950 border-amber-700 text-amber-300'
+                              : 'bg-sky-950 border-sky-700 text-sky-300'
+                          }`}
+                        >
+                          {proj.ide}
+                        </span>
+                        <span className="text-xs font-bold text-amber-200 truncate">
+                          {proj.project_name}
+                        </span>
+                        <span className="text-[9px] font-mono text-emerald-400 ml-auto shrink-0 flex items-center gap-0.5">
+                          <Clock className="w-2.5 h-2.5" />
+                          {new Date(proj.last_updated).toLocaleTimeString([], {
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })}
+                        </span>
+                      </div>
+                      <div className="text-[11px] font-medium text-emerald-300 truncate">
+                        {proj.conversation_title}
+                      </div>
+                      {proj.latest_message_snippet && (
+                        <div className="text-[10px] text-gray-400 truncate font-mono">
+                          {proj.latest_message_snippet}
+                        </div>
+                      )}
+                    </div>
+                    {isSelected && <Check className="w-4 h-4 text-amber-400 shrink-0" />}
+                  </button>
+                )
+              })}
+            </div>
           </div>
         )}
       </div>
 
-      {/* Main Container: Activity Rail + Side Panel + Chat Stream (Chat Visibility Guaranteed) */}
-      <div className="flex-1 flex gap-1.5 sm:gap-2 min-h-0 relative overflow-hidden">
-        {/* Antigravity Left Activity Rail (Native Tactile Project Switcher) */}
-        <nav className="w-11 sm:w-12 shrink-0 flex flex-col items-center py-2 bg-[#080d0a] border border-emerald-950 rounded-2xl gap-2 shadow-xl z-20 select-none">
-          {/* Top Activity Drawer Trigger */}
-          <button
-            onClick={() => {
-              hapticMedium()
-              setIsSidePanelOpen((prev) => !prev)
-            }}
-            className={`w-8 h-8 rounded-xl flex items-center justify-center transition-all active:scale-90 ${
-              isSidePanelOpen
-                ? 'bg-amber-500 text-black shadow-[0_0_12px_rgba(251,191,36,0.6)] ring-1 ring-amber-400'
-                : 'bg-[#0f1712] border border-amber-500/30 text-amber-400 hover:bg-amber-950/40'
-            }`}
-            title="Expand Antigravity Workspace Drawer"
-          >
-            <PanelLeft className="w-4 h-4" />
-          </button>
-
-          <div className="w-6 h-px bg-emerald-950/80 my-0.5" />
-
-          {/* All Projects Avatar */}
-          <button
-            onClick={() => selectProjectAndChat('all', 'all')}
-            className={`relative w-8 h-8 rounded-xl flex flex-col items-center justify-center transition-all active:scale-90 ${
-              selectedProject === 'all'
-                ? 'bg-gradient-to-tr from-amber-500 to-yellow-500 text-black font-bold shadow-[0_0_10px_rgba(251,191,36,0.4)]'
-                : 'bg-[#0d140f] border border-emerald-950 text-emerald-400 hover:text-emerald-200'
-            }`}
-            title="All Workspaces"
-          >
-            <Layers className="w-3.5 h-3.5" />
-            <span className="text-[7.5px] font-mono font-bold leading-none mt-0.5">ALL</span>
-            {selectedProject === 'all' && (
-              <span className="absolute -left-1 top-2 bottom-2 w-1 bg-amber-400 rounded-r shadow-[0_0_6px_rgba(251,191,36,0.9)]" />
-            )}
-          </button>
-
-          {/* Individual Project Avatars */}
-          <div className="flex-1 flex flex-col gap-2 overflow-y-auto scrollbar-none py-1">
-            {projectStats.map((p) => {
-              const isActive = selectedProject.toLowerCase() === p.name.toLowerCase()
-              const Icon = getProjectIcon(p.name)
-              const acronym = p.name
-                .split(' ')
-                .map((w) => w[0])
-                .join('')
-                .slice(0, 3)
-                .toUpperCase()
-
-              return (
-                <button
-                  key={p.name}
-                  onClick={() => selectProjectAndChat(p.name, 'all')}
-                  className={`relative w-8 h-8 rounded-xl flex flex-col items-center justify-center transition-all active:scale-90 shrink-0 ${
-                    isActive
-                      ? 'bg-gradient-to-tr from-amber-500 to-yellow-500 text-black font-bold shadow-[0_0_10px_rgba(251,191,36,0.4)]'
-                      : 'bg-[#0d140f] border border-emerald-950 text-emerald-400 hover:text-emerald-200'
-                  }`}
-                  title={`${p.name} (${p.count} events)`}
-                >
-                  <Icon className="w-3.5 h-3.5" />
-                  <span className="text-[7.5px] font-mono font-bold leading-none mt-0.5">{acronym}</span>
-                  {isActive && (
-                    <span className="absolute -left-1 top-2 bottom-2 w-1 bg-amber-400 rounded-r shadow-[0_0_6px_rgba(251,191,36,0.9)]" />
-                  )}
-                </button>
-              )
-            })}
-          </div>
-        </nav>
-
-        {/* Antigravity Side Panel Drawer / Docked Column */}
-        {(isSidePanelOpen || isSplitView) && (
-          <>
-            {/* Mobile Translucent Frosted Glass Backdrop (Chat Visibility Guaranteed!) */}
-            {!isSplitView && (
-              <div
-                onClick={() => {
-                  hapticLight()
-                  setIsSidePanelOpen(false)
-                }}
-                className="absolute inset-0 z-30 bg-black/45 backdrop-blur-[2px] transition-opacity cursor-pointer"
-                title="Tap to focus chat feed"
-              />
-            )}
-
-            <aside
-              className={`${
-                isSplitView
-                  ? 'w-72 md:w-80 shrink-0 flex flex-col bg-[#070c09] border border-emerald-950 rounded-2xl overflow-hidden shadow-2xl z-10'
-                  : 'absolute top-0 bottom-0 left-0 z-40 w-[80vw] sm:w-80 max-w-[320px] bg-[#070c09]/98 border-r border-amber-500/40 rounded-r-2xl p-0 flex flex-col shadow-2xl animate-slideRight overflow-hidden'
-              }`}
-            >
-              {/* Side Panel Header */}
-              <div className="p-3 border-b border-emerald-950/80 bg-[#0c140f] flex items-center justify-between shrink-0">
-                <div className="flex items-center gap-2">
-                  <PanelLeft className="w-4 h-4 text-amber-400 shrink-0" />
-                  <div>
-                    <h3 className="font-bold text-xs text-amber-200 uppercase tracking-wider font-mono">
-                      Antigravity Workspaces
-                    </h3>
-                    <p className="text-[9.5px] text-emerald-400/80 font-mono">
-                      {groupedProjects.length} Projects · {projects.length || projectStats.length} Chats
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-1.5">
-                  {/* Recency Time Filter Toggle (7d vs 30d per user request) */}
-                  <div className="flex bg-[#060a08] border border-emerald-950 p-0.5 rounded-lg text-[9px] font-mono font-bold">
-                    <button
-                      onClick={() => {
-                        hapticLight()
-                        setTimeFilterDays(7)
-                        onRefreshProjects?.(7)
-                      }}
-                      className={`px-1.5 py-0.5 rounded transition-all ${
-                        timeFilterDays === 7
-                          ? 'bg-amber-500 text-black shadow-sm'
-                          : 'text-gray-400 hover:text-emerald-300'
-                      }`}
-                      title="Show last 7 days only"
-                    >
-                      7d
-                    </button>
-                    <button
-                      onClick={() => {
-                        hapticLight()
-                        setTimeFilterDays(30)
-                        onRefreshProjects?.(30)
-                      }}
-                      className={`px-1.5 py-0.5 rounded transition-all ${
-                        timeFilterDays === 30
-                          ? 'bg-amber-500 text-black shadow-sm'
-                          : 'text-gray-400 hover:text-emerald-300'
-                      }`}
-                      title="Show last 30 days"
-                    >
-                      30d
-                    </button>
-                  </div>
-
-                  {!isSplitView && (
-                    <button
-                      onClick={() => {
-                        hapticLight()
-                        setIsSidePanelOpen(false)
-                      }}
-                      className="p-1 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white shrink-0 active:scale-95 ml-0.5"
-                      title="Close Side Panel"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {/* Side Panel Internal Search */}
-              <div className="p-2 border-b border-emerald-950/60 bg-[#080d0a] shrink-0">
-                <div className="relative">
-                  <Search className="w-3 h-3 absolute left-2 top-2 text-emerald-600" />
-                  <input
-                    type="text"
-                    value={sidePanelFilter}
-                    onChange={(e) => setSidePanelFilter(e.target.value)}
-                    placeholder="Filter projects or chats..."
-                    className="w-full bg-[#050806] border border-emerald-950 rounded-lg pl-7 pr-6 py-1 text-[10px] text-emerald-100 placeholder-emerald-800 focus:outline-none focus:border-amber-400 font-mono"
-                  />
-                  {sidePanelFilter && (
-                    <button
-                      onClick={() => {
-                        hapticLight()
-                        setSidePanelFilter('')
-                      }}
-                      className="absolute right-2 top-1.5 text-gray-500 hover:text-white"
-                    >
-                      <X className="w-2.5 h-2.5" />
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {/* Side Panel Content: Hierarchical Projects & Chats */}
-              <div className="flex-1 overflow-y-auto p-2 space-y-2.5">
-                {/* Unified All Projects Option */}
-                <button
-                  onClick={() => selectProjectAndChat('all', 'all')}
-                  className={`w-full text-left p-2.5 rounded-xl border transition-all active:scale-[0.98] ${
-                    selectedProject === 'all'
-                      ? 'bg-amber-950/60 border-amber-400 shadow-md ring-1 ring-amber-400/30'
-                      : 'bg-[#0c140f] border-emerald-950 hover:border-emerald-800'
-                  }`}
-                >
-                  <div className="flex items-center justify-between mb-1">
-                    <div className="flex items-center gap-1.5 font-bold text-xs text-amber-300">
-                      <Layers className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                      <span>All Streamed Workspaces</span>
-                    </div>
-                    <span className="text-[9.5px] px-1.5 py-0.2 rounded bg-emerald-950 text-emerald-300 font-mono">
-                      {steps.length} msgs
-                    </span>
-                  </div>
-                  <p className="text-[10px] text-gray-400 line-clamp-1">
-                    Unified stream of multi-agent reasoning & tools
+      {/* Project Folder Structure Modal */}
+      {showFolderModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#0a0f0c] border border-amber-500/50 rounded-2xl w-full max-w-lg max-h-[80vh] flex flex-col shadow-2xl overflow-hidden animate-slideDown">
+            <div className="p-3.5 border-b border-emerald-950 flex items-center justify-between bg-[#060907]">
+              <div className="flex items-center gap-2 min-w-0">
+                <FolderTree className="w-4 h-4 text-amber-400 shrink-0" />
+                <div className="truncate">
+                  <h3 className="text-xs font-bold text-amber-200 truncate">
+                    {folderStructure ? folderStructure.project_name : 'Project Directory Explorer'}
+                  </h3>
+                  <p className="text-[10px] font-mono text-emerald-400 truncate">
+                    {folderStructure ? folderStructure.root_path : 'Scanning workstation filesystem...'}
                   </p>
-                </button>
-
-                {/* Grouped Projects & Their Conversations */}
-                {groupedProjects
-                  .filter((group) => {
-                    if (!sidePanelFilter.trim()) return true
-                    const q = sidePanelFilter.toLowerCase()
-                    return (
-                      group.projectName.toLowerCase().includes(q) ||
-                      group.conversations.some((c) =>
-                        c.conversation_title.toLowerCase().includes(q)
-                      )
-                    )
-                  })
-                  .map((group) => {
-                    const isGroupActive =
-                      selectedProject.toLowerCase() === group.projectName.toLowerCase()
-                    const Icon = getProjectIcon(group.projectName)
-
-                    return (
-                      <div
-                        key={group.projectName}
-                        className="rounded-xl bg-[#090f0c] border border-emerald-950/90 overflow-hidden shadow-sm space-y-1"
-                      >
-                        {/* Project Header Banner */}
-                        <div className="p-2 bg-[#0d1611] border-b border-emerald-950/80 flex items-center justify-between gap-1.5">
-                          <button
-                            onClick={() => selectProjectAndChat(group.projectName, 'all')}
-                            className="flex items-center gap-1.5 text-left min-w-0 flex-1 hover:opacity-90"
-                          >
-                            <Icon className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                            <span className="font-bold text-xs text-amber-100 truncate">
-                              {group.projectName}
-                            </span>
-                            <span
-                              className={`text-[8.5px] uppercase px-1 py-0.2 rounded font-mono font-bold shrink-0 border ${
-                                group.ide.toLowerCase() === 'cursor'
-                                  ? 'bg-amber-950/80 border-amber-600/70 text-amber-300'
-                                  : group.ide.toLowerCase() === 'vscode'
-                                  ? 'bg-sky-950/80 border-sky-600/70 text-sky-300'
-                                  : 'bg-emerald-950/80 border-emerald-600/70 text-emerald-300'
-                              }`}
-                            >
-                              {group.ide}
-                            </span>
-                          </button>
-
-                          {/* + New Chat in this Project */}
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              handleStartNewChat(group.projectName)
-                            }}
-                            className="text-[9.5px] px-2 py-0.5 rounded-lg bg-gradient-to-r from-amber-500 to-yellow-500 text-black font-bold flex items-center gap-1 shrink-0 active:scale-95 shadow-sm transition-all"
-                            title={`Start new conversation in ${group.projectName}`}
-                          >
-                            <Plus className="w-3 h-3 text-black stroke-[3]" />
-                            <span>New</span>
-                          </button>
-                        </div>
-
-                        {/* Project Path Tag & Sub-tabs: Chats vs Structure */}
-                        <div className="px-2 pt-1 flex items-center justify-between gap-1">
-                          {group.projectPath ? (
-                            <span className="text-[9px] font-mono text-emerald-500/80 truncate max-w-[170px]" title={group.projectPath}>
-                              📁 {group.projectPath}
-                            </span>
-                          ) : (
-                            <span className="text-[9px] font-mono text-gray-500 italic">
-                              Live Workspace
-                            </span>
-                          )}
-
-                          <div className="flex items-center gap-1 shrink-0 bg-[#060a08] p-0.5 rounded-lg border border-emerald-950">
-                            <button
-                              onClick={() => handleToggleStructureTab(group, 'chats')}
-                              className={`px-1.5 py-0.5 text-[8.5px] font-mono font-bold rounded transition-all ${
-                                (projectTabs[group.projectName] || 'chats') === 'chats'
-                                  ? 'bg-amber-950 text-amber-300 border border-amber-500/40'
-                                  : 'text-gray-400 hover:text-emerald-300'
-                              }`}
-                            >
-                              Chats ({group.conversations.length})
-                            </button>
-                            <button
-                              onClick={() => handleToggleStructureTab(group, 'structure')}
-                              className={`px-1.5 py-0.5 text-[8.5px] font-mono font-bold rounded transition-all ${
-                                projectTabs[group.projectName] === 'structure'
-                                  ? 'bg-amber-950 text-amber-300 border border-amber-500/40'
-                                  : 'text-gray-400 hover:text-emerald-300'
-                              }`}
-                            >
-                              Files
-                            </button>
-                          </div>
-                        </div>
-
-                        {/* Content Area: Either Folder Structure or Conversation List */}
-                        {projectTabs[group.projectName] === 'structure' ? (
-                          <div className="p-2 border-t border-emerald-950/60 bg-[#060907] max-h-48 overflow-y-auto">
-                            {structureLoading[group.projectName] ? (
-                              <div className="flex items-center justify-center gap-1.5 py-4 text-xs font-mono text-amber-400">
-                                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                                <span>Scanning folder structure...</span>
-                              </div>
-                            ) : (
-                              <FileTreeView
-                                entries={structureData[group.projectName] || []}
-                                expandedFolders={expandedFolders}
-                                onToggleFolder={toggleFolder}
-                              />
-                            )}
-                          </div>
-                        ) : (
-                          <div className="p-1 space-y-1">
-                            {group.conversations.slice(0, 6).map((conv) => {
-                              const isConvActive = isGroupActive && selectedConversation === conv.id
-                              const isLoadingThis = loadingConvId === conv.id
-
-                              return (
-                                <button
-                                  key={conv.id}
-                                  onClick={() => handleSelectConversation(group.projectName, conv.id)}
-                                  className={`w-full text-left p-2 rounded-lg border transition-all text-xs group active:scale-[0.98] ${
-                                    isConvActive
-                                      ? 'bg-amber-950/70 border-amber-400 shadow-md ring-1 ring-amber-400/40 text-amber-100'
-                                      : 'bg-[#060a08] border-emerald-950/60 hover:border-amber-500/40 text-gray-300 hover:bg-[#0c140f]'
-                                  }`}
-                                >
-                                  <div className="flex items-center justify-between gap-1 mb-1">
-                                    <div className="flex items-center gap-1.5 min-w-0">
-                                      {isLoadingThis ? (
-                                        <RefreshCw className="w-3 h-3 text-amber-400 animate-spin shrink-0" />
-                                      ) : (
-                                        <MessageSquare
-                                          className={`w-3 h-3 shrink-0 ${
-                                            isConvActive ? 'text-amber-400' : 'text-emerald-500/70'
-                                          }`}
-                                        />
-                                      )}
-                                      <span className="font-semibold text-[11px] truncate leading-tight">
-                                        {conv.conversation_title}
-                                      </span>
-                                    </div>
-                                    <span className="text-[9px] font-mono text-emerald-400/80 shrink-0">
-                                      {conv.step_count} ev
-                                    </span>
-                                  </div>
-
-                                  {conv.latest_message_snippet && (
-                                    <div className="text-[9.5px] font-mono text-gray-400 truncate opacity-75 pl-4">
-                                      "{conv.latest_message_snippet}"
-                                    </div>
-                                  )}
-
-                                  <div className="flex items-center justify-between text-[8.5px] text-emerald-600/70 font-mono pt-1 pl-4">
-                                    <span className="flex items-center gap-1">
-                                      <Clock className="w-2.5 h-2.5" />
-                                      {conv.last_updated
-                                        ? new Date(conv.last_updated).toLocaleTimeString([], {
-                                            hour: '2-digit',
-                                            minute: '2-digit',
-                                          })
-                                        : 'Live'}
-                                    </span>
-                                    {isConvActive && (
-                                      <span className="flex items-center gap-1 text-amber-400 font-bold">
-                                        <CheckCircle2 className="w-2.5 h-2.5" />
-                                        Active
-                                      </span>
-                                    )}
-                                  </div>
-                                </button>
-                              )
-                            })}
-                          </div>
-                        )}
-                      </div>
-                    )
-                  })}
+                </div>
               </div>
-            </aside>
-          </>
-        )}
-
-        {/* Primary Chat Feed Section */}
-        <section className="flex-1 flex flex-col bg-[#070c09] border border-emerald-950 rounded-2xl overflow-hidden min-h-0 relative shadow-xl">
-          {/* Active Filter Pill Bar in Chat Header */}
-          <div className="bg-[#0b120e] px-3 py-1.5 border-b border-emerald-950 flex items-center justify-between text-xs shrink-0">
-            <div className="flex items-center gap-2 min-w-0">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
-              <span className="font-bold text-amber-200 truncate">
-                {activeConversation
-                  ? activeConversation.conversation_title
-                  : selectedProject === 'all'
-                  ? 'Unified Live Stream'
-                  : `Project: ${selectedProject}`}
-              </span>
-              <span className="text-[10px] text-emerald-500 font-mono shrink-0">
-                ({filteredSteps.length} of {steps.length})
-              </span>
+              <button
+                onClick={() => setShowFolderModal(false)}
+                className="p-1.5 rounded-lg bg-emerald-950/60 hover:bg-amber-950 text-gray-300 hover:text-amber-300"
+              >
+                <X className="w-4 h-4" />
+              </button>
             </div>
 
-            {(selectedProject !== 'all' || selectedConversation !== 'all') && (
-              <button
-                onClick={() => selectProjectAndChat('all', 'all')}
-                className="text-[10px] text-amber-400 hover:text-amber-300 font-mono font-semibold flex items-center gap-1 shrink-0 active:scale-95"
-              >
-                <span>Reset to All</span>
-              </button>
-            )}
+            <div className="flex-1 overflow-y-auto p-3 space-y-1">
+              {loadingFolder ? (
+                <div className="py-12 text-center text-xs font-mono text-amber-300 animate-pulse">
+                  Reading project directory tree...
+                </div>
+              ) : folderStructure && folderStructure.entries.length > 0 ? (
+                renderFileTree(folderStructure.entries)
+              ) : (
+                <div className="py-12 text-center text-xs font-mono text-gray-500">
+                  No files found in project directory.
+                </div>
+              )}
+            </div>
           </div>
+        </div>
+      )}
 
-          {/* Steps Scroll Area with Safe Bottom Padding */}
-          <div className="flex-1 overflow-y-auto p-2.5 sm:p-4 space-y-3 sm:space-y-4 pb-36">
-            {filteredSteps.length === 0 ? (
-              <div className="text-center py-20 text-emerald-600/70 text-xs font-mono space-y-2">
-                <Bot className="w-10 h-10 text-emerald-500/30 mx-auto opacity-50" />
-                <p>No chat events found matching the active filter.</p>
-                {selectedProject !== 'all' && (
-                  <button
-                    onClick={() => selectProjectAndChat('all', 'all')}
-                    className="px-3 py-1.5 rounded-xl bg-amber-500 text-black font-bold text-xs active:scale-95 transition-all shadow-sm"
-                  >
-                    Switch back to All Workspaces
-                  </button>
-                )}
-              </div>
-            ) : (
-              filteredSteps.map((step) => {
-                const isUser = step.source === 'USER'
-                const isThinkingExpanded = expandedThinking[step.id] || false
-                const options = extractOptions(step)
-                const displayContent = step.content
-                  ? step.content.replace(/\[OPTIONS:\s*[^\]]+\]/gi, '').trim()
-                  : ''
+      {/* Main Conversation Stream */}
+      <div className="flex-1 overflow-y-auto px-3 py-3 space-y-4">
+        {loadingConvId && (
+          <div className="text-center py-6 text-xs text-amber-300 font-mono animate-pulse">
+            Loading conversation transcript from disk...
+          </div>
+        )}
 
-                const stepProject = step.project_name || 'PulseBridge'
-
-                return (
-                  <div
-                    key={step.id}
-                    className={`flex gap-2 text-xs leading-relaxed ${
-                      isUser ? 'flex-row-reverse' : 'flex-row'
-                    }`}
-                  >
-                    {/* User / Agent Avatar */}
-                    <div
-                      className={`w-6 h-6 sm:w-7 sm:h-7 rounded-xl flex items-center justify-center shrink-0 shadow-md ${
-                        isUser
-                          ? 'bg-gradient-to-tr from-amber-500 to-yellow-500 text-black font-bold'
-                          : 'bg-gradient-to-tr from-emerald-800 to-emerald-600 text-emerald-200'
-                      }`}
-                    >
-                      {isUser ? <User className="w-3.5 h-3.5 text-black" /> : <Bot className="w-3.5 h-3.5" />}
-                    </div>
-
-                    {/* Chat Bubble Container with Top Hairline Light */}
-                    <div
-                      className={`max-w-[90%] sm:max-w-[82%] rounded-2xl p-3 sm:p-3.5 space-y-2 shadow-xl border-t ${
-                        isUser
-                          ? 'bg-gradient-to-r from-amber-600 to-yellow-600 text-black font-medium rounded-tr-none shadow-amber-950/40 border-t-white/30'
-                          : 'bg-[#0c140f] border border-emerald-900/70 text-emerald-100 rounded-tl-none shadow-emerald-950/20 border-t-emerald-500/30'
-                      }`}
-                    >
-                      {/* Project & Context Badge Header */}
-                      <div className="flex items-center justify-between gap-2 pb-1 border-b border-white/10 text-[10px] font-mono">
-                        <button
-                          onClick={() => selectProjectAndChat(stepProject, 'all')}
-                          className={`flex items-center gap-1 font-bold hover:underline transition-all ${
-                            isUser ? 'text-black/80' : 'text-amber-400'
-                          }`}
-                          title={`Filter to ${stepProject}`}
-                        >
-                          <Folder className="w-3 h-3 text-amber-400 shrink-0" />
-                          <span className="truncate max-w-[120px]">{stepProject}</span>
-                          <span className="opacity-60">·</span>
-                          <span className="uppercase text-[9px]">{step.ide}</span>
-                        </button>
-
-                        <span className={isUser ? 'text-black/60' : 'text-emerald-500'}>
-                          {step.timestamp
-                            ? new Date(step.timestamp).toLocaleTimeString([], {
-                                hour: '2-digit',
-                                minute: '2-digit',
-                              })
-                            : ''}
-                        </span>
+        {displayedSteps.length === 0 ? (
+          <div className="h-full flex flex-col items-center justify-center text-center p-6 text-gray-500 space-y-3">
+            <div className="w-12 h-12 rounded-2xl bg-[#0d140f] border border-emerald-900/60 flex items-center justify-center text-amber-400 shadow-[0_0_20px_rgba(234,179,8,0.1)]">
+              <Sparkles className="w-6 h-6" />
+            </div>
+            <div className="space-y-1">
+              <p className="text-sm font-semibold text-amber-200">No Conversation Steps Yet</p>
+              <p className="text-xs text-emerald-500/70 max-w-xs">
+                Send a prompt below or switch projects above to inspect live AI reasoning, tool calls, and responses.
+              </p>
+            </div>
+          </div>
+        ) : viewMode === 'turns' || viewMode === 'responses' ? (
+          /* ANTIGRAVITY TURN-GROUPED VIEW (OR CLEAN RESPONSES VIEW) */
+          chatTurns.map((turn, turnIdx) => {
+            if (turn.kind === 'user' && turn.userStep) {
+              return (
+                <div key={turn.id} className="flex flex-col items-end">
+                  <div className="max-w-[90%] sm:max-w-[82%] rounded-2xl rounded-tr-sm p-3.5 bg-gradient-to-br from-amber-600/95 via-amber-500/95 to-yellow-500/95 text-black font-medium shadow-[0_4px_20px_rgba(234,179,8,0.2)] border border-amber-300/60 space-y-1.5">
+                    <div className="flex items-center justify-between gap-3 text-[10px] text-black/75 font-mono font-bold">
+                      <div className="flex items-center gap-1.5">
+                        <User className="w-3 h-3 text-black" />
+                        <span>YOU</span>
+                        {turn.projectName && (
+                          <span className="px-1.5 py-0.2 rounded bg-black/15 text-black text-[9px]">
+                            {turn.projectName}
+                          </span>
+                        )}
                       </div>
+                      <span>
+                        {new Date(turn.timestamp).toLocaleTimeString([], {
+                          hour: '2-digit',
+                          minute: '2-digit',
+                          second: '2-digit',
+                        })}
+                      </span>
+                    </div>
+                    <div className="text-xs sm:text-[13px] leading-relaxed whitespace-pre-wrap break-words font-sans font-semibold">
+                      {turn.userStep.content}
+                    </div>
+                  </div>
+                </div>
+              )
+            }
 
-                      {/* Agent Reasoning Box in Radiant Gold */}
-                      {step.thinking && (
-                        <div className="rounded-xl bg-amber-950/30 border border-amber-700/50 p-2 sm:p-2.5 text-amber-200 shadow-sm">
-                          <button
-                            onClick={() => toggleThinking(step.id)}
-                            className="flex items-center justify-between w-full text-[11px] font-bold text-amber-300"
-                          >
-                            <span className="flex items-center gap-1.5 font-mono">
-                              <Sparkles className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                              Agent Reasoning
+            // Agent Turn
+            const isLatestTurn = turnIdx === chatTurns.length - 1
+            const hasPipeline = turn.executionItems.length > 0
+            // Auto-expand pipeline if the turn has no final response yet, or if user explicitly toggled it
+            const isPipelineOpen =
+              expandedTurns[turn.id] !== undefined
+                ? expandedTurns[turn.id]
+                : turn.finalResponses.length === 0 && isLatestTurn
+
+            return (
+              <div key={turn.id} className="flex flex-col items-start space-y-2">
+                <div className="w-full max-w-[97%] sm:max-w-[92%] space-y-2">
+                  {/* 1. Collapsible Antigravity Thought & Tool Execution Accordion */}
+                  {hasPipeline && viewMode === 'turns' && (
+                    <div className="rounded-2xl bg-[#080d0a] border border-emerald-900/70 overflow-hidden shadow-md">
+                      <button
+                        type="button"
+                        onClick={() => toggleTurnPipeline(turn.id)}
+                        className="w-full px-3.5 py-2.5 flex items-center justify-between gap-2 text-left bg-[#0b120e] hover:bg-emerald-950/50 transition-all"
+                      >
+                        <div className="flex items-center gap-2 flex-wrap min-w-0">
+                          {isPipelineOpen ? (
+                            <ChevronDown className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                          ) : (
+                            <ChevronRight className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                          )}
+                          <span className="text-[11px] font-mono font-bold text-emerald-300 flex items-center gap-1">
+                            <Brain className="w-3.5 h-3.5 text-amber-400" />
+                            <span>
+                              {turn.totalThoughts > 0
+                                ? `${turn.totalThoughts} ${turn.totalThoughts === 1 ? 'Thought' : 'Thoughts'}`
+                                : 'Agent Execution'}
                             </span>
-                            {isThinkingExpanded ? (
-                              <ChevronDown className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                            ) : (
-                              <ChevronRight className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                            )}
-                          </button>
-                          {isThinkingExpanded && (
-                            <div className="mt-2 text-[11px] text-amber-100/90 whitespace-pre-wrap font-mono max-h-52 overflow-y-auto leading-normal">
-                              {step.thinking}
-                            </div>
+                          </span>
+
+                          {turn.totalToolCalls > 0 && (
+                            <span className="text-[10px] font-mono font-semibold px-2 py-0.5 rounded-md bg-amber-950/70 border border-amber-500/40 text-amber-300 flex items-center gap-1">
+                              <Wrench className="w-3 h-3 text-amber-400" />
+                              <span>
+                                {turn.totalToolCalls} {turn.totalToolCalls === 1 ? 'Tool' : 'Tools'}
+                              </span>
+                            </span>
+                          )}
+
+                          {/* Touched file/command badges */}
+                          {turn.touchedTargets.slice(0, 3).map((target, idx) => (
+                            <span
+                              key={idx}
+                              className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-emerald-950/90 border border-emerald-800/70 text-emerald-300 truncate max-w-[140px]"
+                            >
+                              {target}
+                            </span>
+                          ))}
+                          {turn.touchedTargets.length > 3 && (
+                            <span className="text-[9px] font-mono text-emerald-500">
+                              +{turn.touchedTargets.length - 3} more
+                            </span>
                           )}
                         </div>
-                      )}
 
-                      {/* Tool Calls Display with Quick Copy */}
-                      {step.tool_calls && step.tool_calls.length > 0 && (
-                        <div className="space-y-1.5">
-                          {step.tool_calls.map((call, idx) => {
-                            const callKey = `${step.id}-${idx}`
-                            const isCopied = copiedId === callKey
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {turn.isRunning ? (
+                            <span className="text-[9px] font-mono font-bold px-2 py-0.5 rounded-full bg-amber-500/20 border border-amber-400 text-amber-300 animate-pulse">
+                              Running...
+                            </span>
+                          ) : (
+                            <span className="text-[9px] font-mono text-emerald-500 flex items-center gap-1">
+                              <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                              <span className="hidden sm:inline">
+                                Steps #{turn.firstStepIndex}–#{turn.lastStepIndex}
+                              </span>
+                            </span>
+                          )}
+                        </div>
+                      </button>
+
+                      {/* Expanded Pipeline Timeline */}
+                      {isPipelineOpen && (
+                        <div className="p-3 space-y-2.5 border-t border-emerald-950/90 bg-[#060907]/90">
+                          {turn.executionItems.map((item, itemIdx) => {
+                            const thoughtKey = `${turn.id}-thought-${itemIdx}`
+                            const isThoughtLong = (item.thinking?.length || 0) > 280
+                            const isThoughtExpanded =
+                              expandedThoughts[thoughtKey] !== undefined
+                                ? expandedThoughts[thoughtKey]
+                                : !isThoughtLong
+
                             return (
-                              <div
-                                key={idx}
-                                className="rounded-lg bg-black/60 border border-emerald-950 p-2 font-mono text-[10px] sm:text-[11px] space-y-1 relative group"
-                              >
-                                <div className="flex items-center justify-between text-amber-400 font-semibold">
-                                  <div className="flex items-center gap-1.5">
-                                    <Terminal className="w-3 h-3 text-emerald-400 shrink-0" />
-                                    <span>{call.tool_name}</span>
+                              <div key={itemIdx} className="space-y-2">
+                                {/* Reasoning Block */}
+                                {item.thinking && (
+                                  <div className="rounded-xl bg-[#0a100d] border-l-2 border-amber-400/80 border border-emerald-950/90 p-2.5 space-y-1">
+                                    <div className="flex items-center justify-between text-[10px] font-mono text-amber-300/90">
+                                      <span className="flex items-center gap-1.5 font-semibold">
+                                        <Brain className="w-3 h-3 text-amber-400" />
+                                        <span>Reasoning · Step #{item.stepIndex}</span>
+                                      </span>
+                                      {isThoughtLong && (
+                                        <button
+                                          type="button"
+                                          onClick={() => toggleThought(thoughtKey)}
+                                          className="text-[9px] text-emerald-400 hover:text-amber-300 underline"
+                                        >
+                                          {isThoughtExpanded ? 'Collapse' : 'Expand full thought'}
+                                        </button>
+                                      )}
+                                    </div>
+                                    <div className="text-[11px] text-emerald-100/85 font-mono leading-relaxed whitespace-pre-wrap">
+                                      {isThoughtExpanded
+                                        ? item.thinking
+                                        : `${item.thinking.slice(0, 280)}...`}
+                                    </div>
                                   </div>
-                                  <button
-                                    onClick={() =>
-                                      copyText(callKey, `${call.tool_name}: ${call.action || ''}\n${call.summary || ''}`)
-                                    }
-                                    className="p-1 rounded hover:bg-white/10 text-emerald-500 hover:text-amber-300 transition-all opacity-80 group-hover:opacity-100"
-                                    title="Copy tool call"
-                                  >
-                                    {isCopied ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
-                                  </button>
-                                </div>
-                                {call.action && (
-                                  <div className="text-emerald-300 text-[9.5px]">{call.action}</div>
                                 )}
-                                {call.summary && (
-                                  <div className="text-gray-400 text-[9.5px] italic">{call.summary}</div>
+
+                                {/* Tool Call Cards */}
+                                {item.toolCalls.map((tc, tcIdx) => {
+                                  const toolKey = `${turn.id}-tool-${itemIdx}-${tcIdx}`
+                                  const isToolOpen = !!expandedTools[toolKey]
+                                  const hasDetails = !!(tc.output || tc.arguments)
+
+                                  return (
+                                    <div
+                                      key={tcIdx}
+                                      className="rounded-xl bg-[#090e0b] border border-emerald-900/70 p-2.5 space-y-1.5"
+                                    >
+                                      <div className="flex items-center justify-between gap-2">
+                                        <div className="flex items-center gap-2 min-w-0 flex-wrap">
+                                          {getToolIcon(tc.tool_name)}
+                                          <span className="text-[11px] font-bold text-amber-200 truncate">
+                                            {tc.action || tc.tool_name}
+                                          </span>
+                                          <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-emerald-950 text-emerald-400 border border-emerald-800/60">
+                                            {tc.tool_name}
+                                          </span>
+                                          {tc.target_file && (
+                                            <span
+                                              className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-amber-950/60 border border-amber-500/40 text-amber-300 truncate max-w-[220px]"
+                                              title={tc.target_file}
+                                            >
+                                              {formatShortTarget(tc.target_file)}
+                                            </span>
+                                          )}
+                                        </div>
+
+                                        {hasDetails && (
+                                          <button
+                                            type="button"
+                                            onClick={() => toggleToolOutput(toolKey)}
+                                            className="px-2 py-0.5 rounded-lg bg-emerald-950/80 hover:bg-amber-950 border border-emerald-800/70 text-[9px] font-mono text-emerald-300 hover:text-amber-300 shrink-0 flex items-center gap-1"
+                                          >
+                                            <span>{ tc.output ? 'Output' : 'Args' }</span>
+                                            {isToolOpen ? (
+                                              <ChevronDown className="w-2.5 h-2.5" />
+                                            ) : (
+                                              <ChevronRight className="w-2.5 h-2.5" />
+                                            )}
+                                          </button>
+                                        )}
+                                      </div>
+
+                                      {tc.summary && tc.summary !== tc.action && (
+                                        <div className="text-[10px] text-gray-400 font-mono pl-5">
+                                          {tc.summary}
+                                        </div>
+                                      )}
+
+                                      {isToolOpen && (
+                                        <div className="mt-1.5 pt-1.5 border-t border-emerald-950 space-y-1.5">
+                                          {tc.arguments && (
+                                            <div>
+                                              <div className="text-[9px] font-mono uppercase text-amber-400/80 mb-0.5">
+                                                Arguments:
+                                              </div>
+                                              <pre className="p-2 rounded-lg bg-[#050806] border border-emerald-950 text-[10px] font-mono text-emerald-300 overflow-x-auto max-h-40">
+                                                {typeof tc.arguments === 'string'
+                                                  ? tc.arguments
+                                                  : JSON.stringify(tc.arguments, null, 2)}
+                                              </pre>
+                                            </div>
+                                          )}
+                                          {tc.output && (
+                                            <div>
+                                              <div className="text-[9px] font-mono uppercase text-emerald-400/80 mb-0.5">
+                                                Result / Output:
+                                              </div>
+                                              <pre className="p-2 rounded-lg bg-[#050806] border border-emerald-950 text-[10px] font-mono text-gray-300 overflow-x-auto max-h-52 whitespace-pre-wrap">
+                                                {tc.output}
+                                              </pre>
+                                            </div>
+                                          )}
+                                        </div>
+                                      )}
+                                    </div>
+                                  )
+                                })}
+
+                                {/* Fallback standalone tool output */}
+                                {item.standaloneOutput && (
+                                  <div className="rounded-xl bg-[#070b09] border border-emerald-950 p-2 text-[10px] font-mono text-gray-400 overflow-x-auto max-h-36 whitespace-pre-wrap">
+                                    {item.standaloneOutput}
+                                  </div>
                                 )}
                               </div>
                             )
                           })}
                         </div>
                       )}
-
-                      {/* Message Content */}
-                      {displayContent && (
-                        <div className="whitespace-pre-wrap font-sans text-xs">
-                          {displayContent}
-                        </div>
-                      )}
-
-                      {/* Interactive Option Chips */}
-                      {options.length > 0 && (
-                        <div className="pt-2 flex flex-wrap gap-1.5 border-t border-amber-500/20 mt-1">
-                          {options.map((opt, i) => (
-                            <button
-                              key={i}
-                              onClick={() => {
-                                hapticLight()
-                                const target =
-                                  selectedProject !== 'all' ? selectedProject : undefined
-                                onSendPrompt(opt, target)
-                              }}
-                              className="px-2.5 py-1 rounded-xl text-xs font-semibold bg-amber-950/80 hover:bg-amber-900 border border-amber-500/80 text-amber-200 active:bg-amber-500 active:text-black active:scale-95 transition-all shadow-sm flex items-center gap-1.5"
-                            >
-                              <Sparkles className="w-3 h-3 text-amber-400 shrink-0" />
-                              <span>{opt}</span>
-                            </button>
-                          ))}
-                        </div>
-                      )}
                     </div>
-                  </div>
-                )
-              })
-            )}
-            <div ref={chatEndRef} />
-          </div>
+                  )}
 
-          {/* Floating Prompt Bar with Non-Overlapping Project Routing */}
-          <div className="absolute bottom-0 left-0 right-0 p-2 sm:p-3 bg-gradient-to-t from-[#060907] via-[#060907]/95 to-transparent z-20">
-            {/* Quick Suggestion Chips */}
-            <div className="flex gap-1.5 overflow-x-auto pb-1.5 scrollbar-none flex-nowrap -mx-0.5 px-0.5">
-              {quickReplies.map((reply, i) => (
-                <button
-                  key={i}
-                  onClick={() => {
-                    hapticLight()
-                    const target = selectedProject !== 'all' ? selectedProject : undefined
-                    onSendPrompt(reply, target)
-                  }}
-                  className="text-[9.5px] font-semibold px-2.5 py-1 rounded-full bg-[#0d140f] border border-emerald-900/80 text-emerald-300 whitespace-nowrap shrink-0 active:bg-amber-950 active:border-amber-400 active:text-amber-300 active:scale-95 transition-all"
-                >
-                  {reply}
-                </button>
-              ))}
-            </div>
+                  {/* 2. Prominent Final Agent Response Card(s) */}
+                  {turn.finalResponses.map((resp, rIdx) => {
+                    const respKey = `${turn.id}-resp-${rIdx}`
+                    return (
+                      <div
+                        key={respKey}
+                        className="rounded-2xl rounded-tl-sm bg-[#0b110e] border border-emerald-800/80 p-4 shadow-xl space-y-3"
+                      >
+                        <div className="flex items-center justify-between gap-2 pb-2 border-b border-emerald-950">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <div className="w-6 h-6 rounded-lg bg-emerald-500/15 border border-emerald-500/40 flex items-center justify-center text-emerald-400 shrink-0">
+                              <Bot className="w-3.5 h-3.5" />
+                            </div>
+                            <span className="text-[11px] font-mono font-bold text-amber-300 tracking-wide">
+                              ANTIGRAVITY
+                            </span>
+                            {turn.projectName && (
+                              <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-800/60 truncate">
+                                {turn.projectName}
+                              </span>
+                            )}
+                          </div>
 
-            {/* Input Bar with Target Project Tag & Glowing Ring */}
-            <div className="flex items-center gap-1.5 sm:gap-2 bg-[#0c140f] border border-amber-500/40 rounded-2xl px-2.5 py-1.5 sm:py-2 shadow-2xl focus-within:border-amber-400 focus-within:ring-2 focus-within:ring-amber-400/30 transition-all">
-              <span className="text-[9.5px] font-mono font-bold px-2 py-0.5 rounded-lg bg-black/60 border border-amber-500/40 text-amber-300 shrink-0 truncate max-w-[110px] sm:max-w-[150px]">
-                To: {selectedProject === 'all' ? 'Active IDE' : selectedProject}
-              </span>
-              <input
-                type="text"
-                value={inputMessage}
-                onChange={(e) => setInputMessage(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder={`Prompt ${selectedProject === 'all' ? 'AI agent' : selectedProject}...`}
-                className="flex-1 bg-transparent text-xs text-amber-100 placeholder-emerald-600/60 focus:outline-none min-w-0"
-              />
-              <button
-                onClick={handleSend}
-                disabled={!inputMessage.trim()}
-                className="p-1.5 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-500 disabled:opacity-40 text-black font-bold transition-all shadow-md shadow-amber-950/40 shrink-0 active:scale-95"
-                title="Send Prompt to Workstation"
+                          <div className="flex items-center gap-2 shrink-0">
+                            {(turn.inputTokens || turn.outputTokens) && (
+                              <span
+                                className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-[#060907] border border-emerald-900 text-emerald-400 hidden sm:inline"
+                                title="Model token telemetry"
+                              >
+                                {turn.inputTokens ? `In: ${formatTokenCount(turn.inputTokens)}` : ''}
+                                {turn.outputTokens ? ` · Out: ${formatTokenCount(turn.outputTokens)}` : ''}
+                              </span>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => copyText(resp.content, respKey)}
+                              className="px-2 py-0.5 rounded-lg bg-emerald-950/70 hover:bg-amber-950 text-emerald-300 hover:text-amber-300 border border-emerald-800/60 text-[9px] font-mono flex items-center gap-1 transition-all"
+                              title="Copy response markdown"
+                            >
+                              {copiedId === respKey ? (
+                                <>
+                                  <Check className="w-2.5 h-2.5 text-emerald-400" />
+                                  <span>Copied</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Copy className="w-2.5 h-2.5" />
+                                  <span>Copy</span>
+                                </>
+                              )}
+                            </button>
+                            <span className="text-[9px] font-mono text-gray-500">
+                              {new Date(resp.timestamp).toLocaleTimeString([], {
+                                hour: '2-digit',
+                                minute: '2-digit',
+                              })}
+                            </span>
+                          </div>
+                        </div>
+
+                        <MarkdownContent content={resp.content} />
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )
+          })
+        ) : (
+          /* RAW STEP-BY-STEP STREAM VIEW */
+          displayedSteps.map((step) => {
+            const isUser = isUserStep(step)
+            const hasThinking = !!step.thinking
+            const hasTools = step.tool_calls && step.tool_calls.length > 0
+            const isError = step.status === 'ERROR'
+
+            return (
+              <div
+                key={step.id}
+                className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`}
               >
-                <Send className="w-3.5 h-3.5 text-black" />
-              </button>
-            </div>
-          </div>
-        </section>
+                <div
+                  className={`max-w-[94%] rounded-2xl p-3.5 space-y-2 border transition-all ${
+                    isUser
+                      ? 'bg-gradient-to-br from-amber-600/90 to-yellow-500/90 border-amber-400/60 text-black font-medium rounded-tr-xs shadow-lg'
+                      : isError
+                      ? 'bg-rose-950/40 border-rose-700/60 text-rose-200 rounded-tl-xs'
+                      : 'bg-[#0a0f0c] border-emerald-900/60 text-gray-200 rounded-tl-xs shadow-md'
+                  }`}
+                >
+                  <div
+                    className={`flex items-center justify-between gap-3 text-[10px] ${
+                      isUser ? 'text-black/80 font-bold' : 'text-gray-400'
+                    }`}
+                  >
+                    <div className="flex items-center gap-1.5 font-mono">
+                      {isUser ? (
+                        <User className="w-3 h-3 text-black" />
+                      ) : isError ? (
+                        <AlertTriangle className="w-3 h-3 text-rose-400" />
+                      ) : (
+                        <Bot className="w-3 h-3 text-amber-400" />
+                      )}
+                      <span className="font-bold">
+                        {isUser ? 'YOU' : `${step.ide.toUpperCase()} · #${step.step_index}`}
+                      </span>
+                    </div>
+                    <span className="font-mono">
+                      {new Date(step.timestamp).toLocaleTimeString([], {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        second: '2-digit',
+                      })}
+                    </span>
+                  </div>
+
+                  {hasThinking && (
+                    <div className="p-2.5 rounded-xl bg-[#060907] border border-emerald-950 text-[11px] font-mono text-emerald-200/90 whitespace-pre-wrap">
+                      {step.thinking}
+                    </div>
+                  )}
+
+                  {hasTools && (
+                    <div className="space-y-1.5">
+                      {step.tool_calls!.map((tool, idx) => (
+                        <div
+                          key={idx}
+                          className="p-2 rounded-xl bg-[#060907] border border-emerald-900/80 text-xs font-mono space-y-1"
+                        >
+                          <div className="flex items-center gap-1.5 text-amber-300 font-bold">
+                            {getToolIcon(tool.tool_name)}
+                            <span>{cleanQuotedString(tool.action)}</span>
+                            <span className="text-[9px] text-emerald-400">({tool.tool_name})</span>
+                          </div>
+                          {tool.output && (
+                            <pre className="p-2 rounded bg-black/60 text-[10px] text-gray-300 overflow-x-auto max-h-40 whitespace-pre-wrap">
+                              {tool.output}
+                            </pre>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {step.content && (
+                    <div className={isUser ? 'text-xs font-semibold whitespace-pre-wrap' : ''}>
+                      {isUser ? sanitizeUserText(step.content) : <MarkdownContent content={step.content} />}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )
+          })
+        )}
+
+        <div ref={bottomRef} />
+      </div>
+
+      {/* Quick Reply Chips + Prompt Composer */}
+      <div className="p-3 bg-[#060907]/95 backdrop-blur-lg border-t border-emerald-950/80 space-y-2.5">
+        <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-0.5">
+          {quickReplies.map((reply) => (
+            <button
+              key={reply}
+              type="button"
+              onClick={() => onSendPrompt(reply)}
+              className="text-[11px] font-medium px-2.5 py-1 rounded-full bg-[#0d140f] hover:bg-emerald-950/80 text-amber-200/90 border border-emerald-900/70 hover:border-amber-500/50 whitespace-nowrap transition-colors shrink-0"
+            >
+              {reply}
+            </button>
+          ))}
+        </div>
+
+        <form onSubmit={handleSubmit} className="flex items-center gap-2">
+          <input
+            type="text"
+            value={promptInput}
+            onChange={(e) => setPromptInput(e.target.value)}
+            placeholder="Send prompt or instruction to Antigravity IDE..."
+            className="flex-1 bg-[#0d140f] border border-emerald-900/80 rounded-xl px-3.5 py-2.5 text-xs text-white placeholder-emerald-600/60 focus:outline-none focus:border-amber-400"
+          />
+          <button
+            type="submit"
+            disabled={!promptInput.trim()}
+            className="p-2.5 rounded-xl bg-gradient-to-tr from-amber-600 to-yellow-500 hover:from-amber-500 hover:to-yellow-400 disabled:opacity-40 text-black font-bold transition-all shrink-0 shadow-[0_0_15px_rgba(234,179,8,0.3)]"
+          >
+            <Send className="w-4 h-4" />
+          </button>
+        </form>
       </div>
     </div>
   )

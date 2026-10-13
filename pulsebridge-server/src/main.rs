@@ -94,6 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/auth/login", post(api::login_handler))
         .route("/api/auth/qr", get(api::qr_code_handler))
         .route("/api/status", get(api::status_handler))
+        .route("/api/telemetry", get(api::telemetry_handler))
         .route("/api/chat", get(api::chat_steps_handler))
         .route("/api/chat/projects", get(api::list_projects_handler))
         .route("/api/projects", get(api::list_projects_handler))
@@ -106,6 +107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/action/click", post(ingest::handle_mouse_click))
         .route("/api/action/scroll", post(ingest::handle_mouse_scroll))
         .route("/api/action/hotkey", post(ingest::handle_hotkey))
+        .route("/api/action/type", post(ingest::handle_type_text))
         .route(
             "/api/action/clipboard",
             get(ingest::handle_get_clipboard).post(ingest::handle_set_clipboard),

@@ -3,7 +3,7 @@ import json
 import sys
 
 BASE_URL = "http://127.0.0.1:8080"
-PIN = sys.argv[1] if len(sys.argv) > 1 else "778899"
+PIN = sys.argv[1] if len(sys.argv) > 1 else "000000"
 
 print("=========================================================================")
 print("  TESTING OPT-IN SHELL SANDBOXING & EXPLOIT BLOCKING (--enable-shell-commands)")

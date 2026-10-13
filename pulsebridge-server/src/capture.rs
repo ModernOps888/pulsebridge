@@ -34,6 +34,7 @@ extern "system" {
     fn CloseWindowStation(hWinSta: isize) -> BOOL;
     fn CloseDesktop(hDesktop: isize) -> BOOL;
     fn SetProcessDPIAware() -> BOOL;
+    fn PrintWindow(hwnd: HWND, hdcBlt: isize, nFlags: u32) -> BOOL;
 }
 
 pub struct ScreenCapturer;
@@ -281,7 +282,7 @@ impl ScreenCapturer {
                             let h = GetSystemMetrics(SM_CYSCREEN).max(600);
                             Self::capture_hwnd_internal(0, 0, 0, w, h, quality)
                         } else {
-                            Self::capture_hwnd_internal(0, rect.left, rect.top, width, height, quality)
+                            Self::capture_hwnd_internal(hwnd_target, rect.left, rect.top, width, height, quality)
                         }
                     }
                 };
@@ -364,14 +365,14 @@ impl ScreenCapturer {
         height: i32,
         quality: u8,
     ) -> Result<Vec<u8>, String> {
-        let hdc_screen = GetDC(hwnd);
+        let hdc_screen = GetDC(0);
         if hdc_screen == 0 {
-            return Err("Failed to get device context".to_string());
+            return Err("Failed to get desktop device context".to_string());
         }
 
         let hdc_mem = CreateCompatibleDC(hdc_screen);
         if hdc_mem == 0 {
-            ReleaseDC(hwnd, hdc_screen);
+            ReleaseDC(0, hdc_screen);
             return Err("Failed to create compatible memory DC".to_string());
         }
 
@@ -390,12 +391,42 @@ impl ScreenCapturer {
         let hbitmap = CreateCompatibleBitmap(hdc_screen, out_w, out_h);
         if hbitmap == 0 {
             DeleteDC(hdc_mem);
-            ReleaseDC(hwnd, hdc_screen);
+            ReleaseDC(0, hdc_screen);
             return Err("Failed to create compatible bitmap".to_string());
         }
 
         let old_bitmap = SelectObject(hdc_mem, hbitmap);
-        let blt_result = if out_w == width && out_h == height {
+
+        // If targeting a specific window (and it is not minimized), try PrintWindow(PW_RENDERFULLCONTENT = 2)
+        // so occluded windows still render their own surface cleanly.
+        let mut captured_via_print_window = false;
+        if hwnd != 0 && IsIconic(hwnd) == 0 {
+            if out_w == width && out_h == height {
+                if PrintWindow(hwnd, hdc_mem, 2) != 0 {
+                    captured_via_print_window = true;
+                }
+            } else {
+                let hdc_full = CreateCompatibleDC(hdc_screen);
+                if hdc_full != 0 {
+                    let hbmp_full = CreateCompatibleBitmap(hdc_screen, width, height);
+                    if hbmp_full != 0 {
+                        let old_full = SelectObject(hdc_full, hbmp_full);
+                        if PrintWindow(hwnd, hdc_full, 2) != 0 {
+                            if StretchBlt(hdc_mem, 0, 0, out_w, out_h, hdc_full, 0, 0, width, height, SRCCOPY) != 0 {
+                                captured_via_print_window = true;
+                            }
+                        }
+                        SelectObject(hdc_full, old_full);
+                        DeleteObject(hbmp_full);
+                    }
+                    DeleteDC(hdc_full);
+                }
+            }
+        }
+
+        let blt_result = if captured_via_print_window {
+            1
+        } else if out_w == width && out_h == height {
             BitBlt(hdc_mem, 0, 0, width, height, hdc_screen, x, y, SRCCOPY)
         } else {
             StretchBlt(hdc_mem, 0, 0, out_w, out_h, hdc_screen, x, y, width, height, SRCCOPY)
@@ -405,7 +436,7 @@ impl ScreenCapturer {
             SelectObject(hdc_mem, old_bitmap);
             DeleteObject(hbitmap);
             DeleteDC(hdc_mem);
-            ReleaseDC(hwnd, hdc_screen);
+            ReleaseDC(0, hdc_screen);
             return Err("GDI BitBlt/StretchBlt screen copy failed".to_string());
         }
 
@@ -434,7 +465,7 @@ impl ScreenCapturer {
         SelectObject(hdc_mem, old_bitmap);
         DeleteObject(hbitmap);
         DeleteDC(hdc_mem);
-        ReleaseDC(hwnd, hdc_screen);
+        ReleaseDC(0, hdc_screen);
 
         if get_di_res == 0 {
             return Err("GetDIBits failed to extract pixel data".to_string());

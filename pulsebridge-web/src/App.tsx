@@ -36,6 +36,7 @@ export function App() {
     sendPrompt,
     sendScroll,
     sendHotkey,
+    sendTypeText,
     requestSnapshot,
     emergencyStop,
     dismissAlert,
@@ -132,6 +133,7 @@ export function App() {
             latestFrame={latestFrame}
             onScroll={sendScroll}
             onHotkey={sendHotkey}
+            onTypeText={sendTypeText}
           />
         )}
         {activeTab === 'system' && <SystemTelemetry telemetry={telemetry} token={token} />}

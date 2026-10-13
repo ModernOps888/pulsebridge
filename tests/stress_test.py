@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 BASE_PORT = sys.argv[1] if len(sys.argv) > 1 else "8080"
 BASE_URL = f"http://127.0.0.1:{BASE_PORT}"
-VALID_PIN = sys.argv[2] if len(sys.argv) > 2 else "778899"
+VALID_PIN = sys.argv[2] if len(sys.argv) > 2 else "000000"
 
 def make_request(url, method="GET", headers=None, data=None):
     if headers is None:

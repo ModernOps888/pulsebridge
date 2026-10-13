@@ -8,13 +8,15 @@ export interface ToolCallInfo {
   summary: string
   arguments?: any
   output?: string
+  target_file?: string
+  status?: string
 }
 
 export interface ChatStep {
   id: string
   step_index: number
   timestamp: string
-  source: 'USER' | 'MODEL' | 'SYSTEM'
+  source: 'USER' | 'MODEL' | 'SYSTEM' | 'USER_EXPLICIT'
   step_type: string
   status: string
   content?: string
@@ -24,6 +26,9 @@ export interface ChatStep {
   project_name?: string
   conversation_id?: string
   conversation_title?: string
+  input_tokens?: number
+  output_tokens?: number
+  cache_read_tokens?: number
 }
 
 export interface ProjectChatInfo {

@@ -134,7 +134,15 @@ pub struct MouseClickCommand {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct HotkeyCommand {
-    pub key: String, // "ctrl_l", "ctrl_k", "ctrl_s", "ctrl_c", "ctrl_tilde", "esc", "enter", "f5", "tab", "backspace", "delete", "up", "down", "left", "right", "pageup", "pagedown", "ctrl_z", "ctrl_y"
+    pub key: String, // "ctrl_l", "ctrl_k", "ctrl_s", "ctrl_c", "ctrl_tilde", "esc", "enter", "f5", "tab", "backspace", "delete", "up", "down", "left", "right", "pageup", "pagedown", "ctrl_z", "ctrl_y", "ctrl_enter", "ctrl_p", "ctrl_shift_p", "ctrl_v"
+    pub window_id: Option<isize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TypeTextCommand {
+    pub text: String,
+    pub window_id: Option<isize>,
+    pub press_enter: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -180,6 +188,9 @@ impl RemoteActionDispatcher {
             project_name: None,
             conversation_id: None,
             conversation_title: None,
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_tokens: None,
         };
         state.add_chat_step(step);
 
@@ -377,9 +388,16 @@ impl RemoteActionDispatcher {
                 GetWindowRect(hwnd, &mut rect);
 
                 if ide_type == IdeSource::Antigravity {
-                    // Click into prompt textarea to guarantee caret focus
-                    let click_x = rect.left + 350;
-                    let click_y = rect.bottom - 75;
+                    // Focus Antigravity composer via Ctrl+L and click into prompt textarea
+                    Self::simulate_combo(&[VK_CONTROL, 0x4C]);
+                    std::thread::sleep(Duration::from_millis(120));
+                    let win_w = rect.right - rect.left;
+                    let click_x = if win_w > 950 {
+                        rect.right - 260
+                    } else {
+                        rect.left + (win_w / 2)
+                    };
+                    let click_y = rect.bottom - 80;
                     SetCursorPos(click_x, click_y);
                     mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                     mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
@@ -631,8 +649,14 @@ impl RemoteActionDispatcher {
         handle.join().map_err(|_| "Scroll thread panicked".to_string())?
     }
 
-    pub fn simulate_hotkey(hotkey: &str) -> Result<(), String> {
-        let key_str = hotkey.to_string();
+    pub fn simulate_type_text(cmd: TypeTextCommand) -> Result<(), String> {
+        if !set_clipboard_text(&cmd.text) {
+            return Err("Failed to set workstation clipboard for typing".to_string());
+        }
+
+        let target_hwnd_opt = cmd.window_id.filter(|&h| h > 0);
+        let press_enter = cmd.press_enter.unwrap_or(true);
+
         let handle = std::thread::spawn(move || {
             unsafe {
                 let winsta = OpenWindowStationA(b"WinSta0\0".as_ptr(), 0, 0x037F);
@@ -644,6 +668,134 @@ impl RemoteActionDispatcher {
                     SetThreadDesktop(desk);
                 }
                 let _ = SetProcessDPIAware();
+
+                if let Some(hwnd) = target_hwnd_opt {
+                    let target_hwnd = hwnd as HWND;
+                    let fg_hwnd = GetForegroundWindow();
+                    if fg_hwnd != target_hwnd {
+                        let fg_thread = if fg_hwnd != 0 {
+                            GetWindowThreadProcessId(fg_hwnd, std::ptr::null_mut())
+                        } else {
+                            0
+                        };
+                        let cur_thread = GetCurrentThreadId();
+                        if fg_thread != 0 && fg_thread != cur_thread {
+                            AttachThreadInput(cur_thread, fg_thread, 1);
+                        }
+                        ShowWindow(target_hwnd, SW_RESTORE);
+                        BringWindowToTop(target_hwnd);
+                        SetForegroundWindow(target_hwnd);
+                        if fg_thread != 0 && fg_thread != cur_thread {
+                            AttachThreadInput(cur_thread, fg_thread, 0);
+                        }
+                        std::thread::sleep(Duration::from_millis(60));
+                    }
+                }
+
+                Self::simulate_ctrl_v();
+                if press_enter {
+                    std::thread::sleep(Duration::from_millis(80));
+                    Self::simulate_enter();
+                }
+
+                if desk != 0 {
+                    CloseDesktop(desk);
+                }
+                if winsta != 0 {
+                    CloseWindowStation(winsta);
+                }
+                Ok(())
+            }
+        });
+
+        handle.join().map_err(|_| "Type text thread panicked".to_string())?
+    }
+
+    pub fn trigger_emergency_stop() -> Result<String, String> {
+        let windows = ScreenCapturer::list_ide_windows();
+        let target_win = windows.first().cloned();
+
+        let handle = std::thread::spawn(move || {
+            unsafe {
+                let winsta = OpenWindowStationA(b"WinSta0\0".as_ptr(), 0, 0x037F);
+                if winsta != 0 {
+                    SetProcessWindowStation(winsta);
+                }
+                let desk = OpenDesktopA(b"default\0".as_ptr(), 0, 0, 0x01FF);
+                if desk != 0 {
+                    SetThreadDesktop(desk);
+                }
+                let _ = SetProcessDPIAware();
+
+                let mut win_label = "Foreground Window".to_string();
+                if let Some(win) = target_win {
+                    win_label = win.title.clone();
+                    let target_hwnd = win.hwnd as HWND;
+                    ShowWindow(target_hwnd, SW_RESTORE);
+                    BringWindowToTop(target_hwnd);
+                    SetForegroundWindow(target_hwnd);
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+
+                // Send Esc + Ctrl+C to halt active generation or terminal execution
+                Self::simulate_key_press(VK_ESCAPE);
+                std::thread::sleep(Duration::from_millis(40));
+                Self::simulate_combo(&[VK_CONTROL, 0x43]);
+
+                if desk != 0 {
+                    CloseDesktop(desk);
+                }
+                if winsta != 0 {
+                    CloseWindowStation(winsta);
+                }
+
+                Ok(win_label)
+            }
+        });
+
+        handle.join().map_err(|_| "Emergency stop thread panicked".to_string())?
+    }
+
+    pub fn simulate_hotkey(hotkey: &str, window_id: Option<isize>) -> Result<(), String> {
+        let key_str = hotkey.to_string();
+        let target_hwnd_opt = window_id.filter(|&h| h > 0).or_else(|| {
+            ScreenCapturer::list_ide_windows().first().map(|w| w.hwnd)
+        });
+
+        let handle = std::thread::spawn(move || {
+            unsafe {
+                let winsta = OpenWindowStationA(b"WinSta0\0".as_ptr(), 0, 0x037F);
+                if winsta != 0 {
+                    SetProcessWindowStation(winsta);
+                }
+                let desk = OpenDesktopA(b"default\0".as_ptr(), 0, 0, 0x01FF);
+                if desk != 0 {
+                    SetThreadDesktop(desk);
+                }
+                let _ = SetProcessDPIAware();
+
+                if let Some(hwnd) = target_hwnd_opt {
+                    let target_hwnd = hwnd as HWND;
+                    let fg_hwnd = GetForegroundWindow();
+                    if fg_hwnd != target_hwnd {
+                        let fg_thread = if fg_hwnd != 0 {
+                            GetWindowThreadProcessId(fg_hwnd, std::ptr::null_mut())
+                        } else {
+                            0
+                        };
+                        let cur_thread = GetCurrentThreadId();
+                        if fg_thread != 0 && fg_thread != cur_thread {
+                            AttachThreadInput(cur_thread, fg_thread, 1);
+                        }
+                        ShowWindow(target_hwnd, SW_RESTORE);
+                        BringWindowToTop(target_hwnd);
+                        SetForegroundWindow(target_hwnd);
+                        if fg_thread != 0 && fg_thread != cur_thread {
+                            AttachThreadInput(cur_thread, fg_thread, 0);
+                        }
+                        std::thread::sleep(Duration::from_millis(40));
+                    }
+                }
 
                 let res = match key_str.to_lowercase().as_str() {
                     "ctrl_l" => {
@@ -662,6 +814,10 @@ impl RemoteActionDispatcher {
                         Self::simulate_combo(&[VK_CONTROL, 0x43]);
                         Ok(())
                     }
+                    "ctrl_v" => {
+                        Self::simulate_combo(&[VK_CONTROL, 0x56]);
+                        Ok(())
+                    }
                     "ctrl_z" => {
                         Self::simulate_combo(&[VK_CONTROL, 0x5A]);
                         Ok(())
@@ -674,6 +830,22 @@ impl RemoteActionDispatcher {
                         Self::simulate_combo(&[VK_CONTROL, 0x41]);
                         Ok(())
                     }
+                    "ctrl_p" => {
+                        Self::simulate_combo(&[VK_CONTROL, 0x50]);
+                        Ok(())
+                    }
+                    "ctrl_shift_p" | "f1" => {
+                        Self::simulate_combo(&[VK_CONTROL, 0x10 /* VK_SHIFT */, 0x50]);
+                        Ok(())
+                    }
+                    "ctrl_enter" => {
+                        Self::simulate_combo(&[VK_CONTROL, VK_RETURN]);
+                        Ok(())
+                    }
+                    "ctrl_slash" | "ctrl_/" => {
+                        Self::simulate_combo(&[VK_CONTROL, 0xBF]);
+                        Ok(())
+                    }
                     "ctrl_tilde" | "ctrl_`" => {
                         Self::simulate_combo(&[VK_CONTROL, 0xC0]);
                         Ok(())
@@ -684,6 +856,10 @@ impl RemoteActionDispatcher {
                     }
                     "enter" => {
                         Self::simulate_key_press(VK_RETURN);
+                        Ok(())
+                    }
+                    "space" => {
+                        Self::simulate_key_press(0x20);
                         Ok(())
                     }
                     "f5" => {
@@ -716,6 +892,14 @@ impl RemoteActionDispatcher {
                     }
                     "right" => {
                         Self::simulate_key_press(0x27);
+                        Ok(())
+                    }
+                    "home" => {
+                        Self::simulate_key_press(0x24);
+                        Ok(())
+                    }
+                    "end" => {
+                        Self::simulate_key_press(0x23);
                         Ok(())
                     }
                     "pageup" | "page_up" => {

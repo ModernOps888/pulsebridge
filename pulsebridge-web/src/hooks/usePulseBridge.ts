@@ -170,13 +170,16 @@ export function usePulseBridge() {
 
           case 'step_added':
             setChatSteps((prev) => {
-              if (prev.some((s) => s.id === msg.payload.id || (s.id.startsWith('local-') && s.content === msg.payload.content))) {
+              if (prev.some((s) => s.id === msg.payload.id)) {
+                return prev.map((s) => (s.id === msg.payload.id ? msg.payload : s))
+              }
+              if (prev.some((s) => s.id.startsWith('local-') && s.content === msg.payload.content)) {
                 return prev.map((s) => (s.id.startsWith('local-') && s.content === msg.payload.content ? msg.payload : s))
               }
               return [...prev, msg.payload]
             })
             triggerHaptic(30)
-            if (msg.payload?.source !== 'USER') {
+            if (msg.payload?.source !== 'USER' && msg.payload?.source !== 'USER_EXPLICIT') {
               sendBackgroundNotification(
                 'PulseBridge: AI Milestone Reached ⚡',
                 msg.payload?.content?.slice(0, 100) || 'Task step finished'
@@ -337,7 +340,7 @@ export function usePulseBridge() {
   }
 
   // Remote hotkey helper
-  const sendHotkey = async (key: string) => {
+  const sendHotkey = async (key: string, windowId?: number | null) => {
     try {
       await fetch('/api/action/hotkey', {
         method: 'POST',
@@ -345,11 +348,34 @@ export function usePulseBridge() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ key }),
+        body: JSON.stringify({ key, window_id: windowId ?? undefined }),
       })
       triggerHaptic(25)
     } catch (err) {
       console.error('Failed to send remote hotkey', err)
+    }
+  }
+
+  // Remote direct type text at current focus
+  const sendTypeText = async (text: string, windowId?: number | null, pressEnter = true): Promise<boolean> => {
+    try {
+      const res = await fetch('/api/action/type', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          text,
+          window_id: windowId ?? undefined,
+          press_enter: pressEnter,
+        }),
+      })
+      triggerHaptic(30)
+      return res.ok
+    } catch (err) {
+      console.error('Failed to type remote text', err)
+      return false
     }
   }
 
@@ -422,8 +448,12 @@ export function usePulseBridge() {
     let active = true
     const measureLatency = async () => {
       try {
+        const authToken = token || localStorage.getItem('pulsebridge_token') || ''
         const start = performance.now()
-        const res = await fetch('/api/telemetry', { cache: 'no-store' })
+        const res = await fetch('/api/telemetry', {
+          cache: 'no-store',
+          headers: { Authorization: `Bearer ${authToken}` },
+        })
         if (res.ok && active) {
           const rtt = Math.round(performance.now() - start)
           setLatencyMs(rtt)
@@ -437,7 +467,7 @@ export function usePulseBridge() {
       active = false
       clearInterval(timer)
     }
-  }, [isAuthenticated, isConnected])
+  }, [isAuthenticated, isConnected, token])
 
   // Auto-connect if token is present
   useEffect(() => {
@@ -560,6 +590,7 @@ export function usePulseBridge() {
     sendPrompt,
     sendScroll,
     sendHotkey,
+    sendTypeText,
     requestSnapshot,
     emergencyStop,
     dismissAlert,

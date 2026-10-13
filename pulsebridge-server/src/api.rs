@@ -301,30 +301,78 @@ fn scan_directory_tree(
     entries
 }
 
+pub async fn telemetry_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(query): Query<AuthHeaderQuery>,
+) -> Result<Json<crate::models::SystemTelemetry>, StatusCode> {
+    verify_auth(&state, &headers, query.token.as_deref())?;
+    Ok(Json(state.get_telemetry()))
+}
+
 fn load_historical_steps_for_conversation(conv_id: &str, max_age_days: u64) -> Vec<ChatStep> {
     let user_profile = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\Users\\Default".to_string());
-    let transcript = std::path::Path::new(&user_profile)
+    let brain_dir = std::path::Path::new(&user_profile)
         .join(".gemini")
         .join("antigravity")
-        .join("brain")
+        .join("brain");
+    let transcript = brain_dir
         .join(conv_id)
         .join(".system_generated")
         .join("logs")
         .join("transcript.jsonl");
 
+    let (proj_name, conv_title) =
+        crate::watchers::antigravity::AntigravityWatcher::detect_project_and_title_for_conv(conv_id, &brain_dir);
+
     let cutoff_millis = chrono::Utc::now().timestamp_millis() - (max_age_days as i64 * 24 * 3600 * 1000);
 
-    let mut steps = Vec::new();
-    if let Ok(file) = std::fs::File::open(&transcript) {
-        use std::io::BufRead;
-        let reader = std::io::BufReader::new(file);
+    let mut steps: Vec<ChatStep> = Vec::new();
+    if let Ok(mut file) = std::fs::File::open(&transcript) {
+        use std::io::{BufRead, Seek, SeekFrom};
+        let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+        if file_len > 1_048_576 {
+            let _ = file.seek(SeekFrom::Start(file_len - 786_432));
+        }
+        let mut reader = std::io::BufReader::new(file);
+        if file_len > 1_048_576 {
+            let mut discard = String::new();
+            let _ = reader.read_line(&mut discard);
+        }
+
         for line in reader.lines().flatten() {
             let trimmed = line.trim();
             if !trimmed.is_empty() {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                    if let Some(step) = crate::watchers::antigravity::AntigravityWatcher::parse_json_step(&v, conv_id) {
-                        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&step.timestamp) {
-                            if dt.timestamp_millis() >= cutoff_millis {
+                    if let Some(mut step) = crate::watchers::antigravity::AntigravityWatcher::parse_json_step(&v, conv_id) {
+                        let within_cutoff = if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&step.timestamp) {
+                            dt.timestamp_millis() >= cutoff_millis
+                        } else {
+                            true
+                        };
+                        if !within_cutoff {
+                            continue;
+                        }
+
+                        step.project_name = Some(proj_name.clone());
+                        step.conversation_id = Some(conv_id.to_string());
+                        step.conversation_title = Some(conv_title.clone());
+
+                        if step.step_type == "TOOL_OUTPUT" {
+                            let mut paired = false;
+                            for existing in steps.iter_mut().rev() {
+                                if existing.step_type == "PLANNER_RESPONSE" {
+                                    if let Some(ref mut calls) = existing.tool_calls {
+                                        if let Some(pending) = calls.iter_mut().find(|tc| tc.output.is_none()) {
+                                            pending.output = step.content.clone();
+                                            pending.status = Some(step.status.clone());
+                                            paired = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            if !paired {
                                 steps.push(step);
                             }
                         } else {

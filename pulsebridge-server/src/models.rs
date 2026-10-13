@@ -39,6 +39,10 @@ pub struct ToolCallInfo {
     pub action: String,
     pub summary: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub arguments: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
@@ -50,7 +54,7 @@ pub struct ChatStep {
     pub step_index: u64,
     pub timestamp: String,
     pub source: String,       // "USER", "MODEL", "SYSTEM"
-    pub step_type: String,    // "USER_INPUT", "PLANNER_RESPONSE", "TOOL_EXECUTION", etc.
+    pub step_type: String,    // "USER_INPUT", "PLANNER_RESPONSE", "TOOL_OUTPUT", "SYSTEM_MESSAGE", etc.
     pub status: String,       // "DONE", "RUNNING", "ERROR"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
@@ -65,6 +69,12 @@ pub struct ChatStep {
     pub conversation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conversation_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

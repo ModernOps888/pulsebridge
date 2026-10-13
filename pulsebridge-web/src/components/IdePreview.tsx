@@ -28,10 +28,11 @@ import type { IdeWindowInfo } from '../types'
 interface IdePreviewProps {
   windows: IdeWindowInfo[]
   token: string | null
-  onRequestSnapshot: (windowId?: number) => void
+  onRequestSnapshot: (windowId?: number, quality?: number) => void
   latestFrame: string | null
   onScroll?: (delta: number, xRatio?: number, yRatio?: number, windowId?: number) => void
-  onHotkey?: (key: string) => void
+  onHotkey?: (key: string, windowId?: number | null) => void
+  onTypeText?: (text: string, windowId?: number | null, pressEnter?: boolean) => Promise<boolean>
 }
 
 export function IdePreview({
@@ -41,6 +42,7 @@ export function IdePreview({
   latestFrame,
   onScroll,
   onHotkey,
+  onTypeText,
 }: IdePreviewProps) {
   const [selectedWindowId, setSelectedWindowId] = useState<number | undefined>(undefined)
   const [refreshInterval, setRefreshInterval] = useState<number>(3000)
@@ -53,6 +55,7 @@ export function IdePreview({
 
   // Interaction Mode: 'click' = Tap to trigger remote click; 'pan' = Touch-drag to scroll canvas
   const [interactionMode, setInteractionMode] = useState<'click' | 'pan'>('click')
+  const [clickType, setClickType] = useState<'left' | 'double' | 'right'>('left')
   const [scrollSpeedMultiplier, setScrollSpeedMultiplier] = useState<number>(1) // 1x = 120, 3x = 360
 
   // Fullscreen / Theater Mode
@@ -65,6 +68,7 @@ export function IdePreview({
   const [scrollIndicator, setScrollIndicator] = useState<{ dir: 'up' | 'down' } | null>(null)
   const scrollIndicatorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [quickTypeText, setQuickTypeText] = useState('')
+  const [autoEnterOnType, setAutoEnterOnType] = useState<boolean>(true)
 
   // Viewport scroll metrics for high-contrast on-screen scrollbars & radar
   const [scrollMetrics, setScrollMetrics] = useState({
@@ -123,9 +127,8 @@ export function IdePreview({
     const url = `/api/preview/frame${tokParam}${winParam}&quality=${streamQuality}&_t=${timestamp}`
     setDirectImageUrl(url)
     setLastRefreshedAt(new Date().toLocaleTimeString())
-    onRequestSnapshot(selectedWindowId)
     setTimeout(() => setLoading(false), 250)
-  }, [selectedWindowId, streamQuality, token, onRequestSnapshot])
+  }, [selectedWindowId, streamQuality, token])
 
   useEffect(() => {
     fetchSnapshot()
@@ -269,7 +272,8 @@ export function IdePreview({
           window_id: selectedWindowId,
           x_ratio: xRatio,
           y_ratio: yRatio,
-          is_right: false,
+          is_right: clickType === 'right',
+          is_double: clickType === 'double',
         }),
       })
       setTimeout(fetchSnapshot, 250)
@@ -484,7 +488,7 @@ export function IdePreview({
   // Send hotkey
   const sendHotkey = async (key: string) => {
     if (onHotkey) {
-      onHotkey(key)
+      onHotkey(key, selectedWindowId)
     } else {
       try {
         await fetch('/api/action/hotkey', {
@@ -493,7 +497,7 @@ export function IdePreview({
             'Content-Type': 'application/json',
             Authorization: `Bearer ${token}`,
           },
-          body: JSON.stringify({ key }),
+          body: JSON.stringify({ key, window_id: selectedWindowId }),
         })
       } catch (err) {
         console.error('Failed to send hotkey', err)
@@ -504,23 +508,29 @@ export function IdePreview({
 
   const handleQuickType = async () => {
     if (!quickTypeText.trim()) return
-    try {
-      await fetch('/api/action/remote_prompt', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          message: quickTypeText.trim(),
-          action_mode: 'inject_window',
-        }),
-      })
-      setQuickTypeText('')
-      setTimeout(fetchSnapshot, 500)
-    } catch (err) {
-      console.error('Failed to type text', err)
+    const text = quickTypeText
+    setQuickTypeText('')
+    if (onTypeText) {
+      await onTypeText(text, selectedWindowId, autoEnterOnType)
+    } else {
+      try {
+        await fetch('/api/action/type', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            text,
+            window_id: selectedWindowId,
+            press_enter: autoEnterOnType,
+          }),
+        })
+      } catch (err) {
+        console.error('Failed to type text', err)
+      }
     }
+    setTimeout(fetchSnapshot, 400)
   }
 
   const selectedWindow = windows.find((w) => w.hwnd === selectedWindowId)
@@ -562,7 +572,31 @@ export function IdePreview({
             </div>
           </div>
 
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5 flex-wrap justify-end">
+            {/* Click Type Selector (Left / Double / Right) */}
+            {interactionMode === 'click' && (
+              <div className="flex items-center bg-[#0d140f] border border-amber-500/40 rounded-xl p-0.5">
+                {([
+                  { id: 'left', label: 'Left' },
+                  { id: 'double', label: '2x Dbl' },
+                  { id: 'right', label: 'Right' },
+                ] as const).map((ct) => (
+                  <button
+                    key={ct.id}
+                    onClick={() => setClickType(ct.id)}
+                    className={`px-2 py-1 rounded-lg text-[9px] font-mono font-bold transition-all ${
+                      clickType === ct.id
+                        ? 'bg-amber-500 text-black shadow-sm'
+                        : 'text-amber-300/70 hover:text-amber-200'
+                    }`}
+                    title={`Tap performs ${ct.label} Click`}
+                  >
+                    {ct.label}
+                  </button>
+                ))}
+              </div>
+            )}
+
             {/* Interaction Mode Toggle */}
             <button
               onClick={() => setInteractionMode(interactionMode === 'click' ? 'pan' : 'click')}
@@ -731,9 +765,10 @@ export function IdePreview({
               >
                 <img
                   ref={imgRef}
-                  src={latestFrame || directImageUrl || ''}
+                  src={directImageUrl || latestFrame || ''}
                   alt="Remote IDE Live Screen"
                   draggable={false}
+                  onError={() => onRequestSnapshot(selectedWindowId, streamQuality)}
                   className={`w-full h-auto rounded-lg object-contain shadow-md transition-opacity duration-200 select-none ${
                     interactionMode === 'click' ? 'cursor-crosshair' : 'cursor-grab'
                   }`}
@@ -1089,22 +1124,57 @@ export function IdePreview({
             </button>
           ))}
         </div>
+
+        {/* Tertiary Shortcuts: Command Palette, Quick Open, Editing Keys */}
+        <div className="grid grid-cols-4 sm:grid-cols-8 gap-1.5 pt-1 border-t border-emerald-950/80">
+          {[
+            { label: 'Ctrl+P', id: 'ctrl_p', hint: 'Quick Open' },
+            { label: 'Cmd Pal', id: 'ctrl_shift_p', hint: 'Ctrl+Shift+P' },
+            { label: 'Ctrl+V', id: 'ctrl_v', hint: 'Paste' },
+            { label: 'Ctrl+↵', id: 'ctrl_enter', hint: 'Accept / Send' },
+            { label: 'Bksp', id: 'backspace', hint: 'Backspace' },
+            { label: 'Del', id: 'delete', hint: 'Delete' },
+            { label: 'Home', id: 'home', hint: 'Line Start' },
+            { label: 'End', id: 'end', hint: 'Line End' },
+          ].map((key) => (
+            <button
+              key={key.id}
+              onClick={() => sendHotkey(key.id)}
+              className="py-1.5 sm:py-2 px-1 rounded-xl bg-[#0d140f] border border-emerald-950 hover:border-amber-400 text-emerald-200 active:bg-amber-600 active:text-black transition-all text-center flex flex-col items-center justify-center hover:scale-[1.02] min-w-0 overflow-hidden"
+            >
+              <span className="text-[10px] sm:text-[11px] font-mono font-bold text-amber-200 truncate max-w-full">{key.label}</span>
+              <span className="text-[7.5px] sm:text-[8px] text-emerald-500/80 truncate max-w-full">{key.hint}</span>
+            </button>
+          ))}
+        </div>
       </div>
 
-      {/* Remote Quick Type Input */}
+      {/* Remote Quick Type Input (Types directly at active cursor focus) */}
       <div className="rounded-2xl bg-[#0a0f0c] border border-emerald-900/60 p-3 flex items-center gap-2 shrink-0">
         <input
           type="text"
           value={quickTypeText}
           onChange={(e) => setQuickTypeText(e.target.value)}
-          placeholder="Type or paste text directly into remote IDE..."
+          placeholder="Type text directly at active cursor focus..."
           className="flex-1 bg-[#0d140f] border border-emerald-900/80 rounded-xl px-3 py-2 text-xs text-amber-100 placeholder-emerald-600/60 focus:outline-none focus:border-amber-400 font-mono"
           onKeyDown={(e) => e.key === 'Enter' && handleQuickType()}
         />
         <button
+          type="button"
+          onClick={() => setAutoEnterOnType(!autoEnterOnType)}
+          className={`px-2.5 py-2 rounded-xl text-[10px] font-mono font-bold border transition-all shrink-0 ${
+            autoEnterOnType
+              ? 'bg-emerald-950/90 border-emerald-500 text-emerald-300'
+              : 'bg-[#0d140f] border-emerald-950 text-gray-500'
+          }`}
+          title={autoEnterOnType ? 'Press Enter after typing (Enabled)' : 'Type without pressing Enter'}
+        >
+          ↵ Enter
+        </button>
+        <button
           onClick={handleQuickType}
           disabled={!quickTypeText.trim()}
-          className="py-2 px-3 rounded-xl bg-gradient-to-r from-amber-600 to-yellow-500 disabled:opacity-40 text-black text-xs font-bold flex items-center gap-1.5"
+          className="py-2 px-3 rounded-xl bg-gradient-to-r from-amber-600 to-yellow-500 disabled:opacity-40 text-black text-xs font-bold flex items-center gap-1.5 shrink-0"
         >
           <Send className="w-3.5 h-3.5" />
           <span>Type</span>

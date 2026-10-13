@@ -201,6 +201,139 @@ impl AntigravityWatcher {
         projects
     }
 
+    pub fn clean_user_prompt(raw: &str) -> String {
+        let mut s = raw.trim().to_string();
+
+        // If <USER_REQUEST>...</USER_REQUEST> exists, extract the inner content directly
+        if let Some(start_idx) = s.find("<USER_REQUEST>") {
+            let after_start = &s[start_idx + "<USER_REQUEST>".len()..];
+            if let Some(end_idx) = after_start.find("</USER_REQUEST>") {
+                return after_start[..end_idx].trim().to_string();
+            } else {
+                s = after_start.trim().to_string();
+            }
+        }
+
+        // Remove known system metadata blocks if no explicit <USER_REQUEST> wrapper
+        let tags_to_strip = [
+            ("<CONTEXT_SUMMARY>", "</CONTEXT_SUMMARY>"),
+            ("<ADDITIONAL_METADATA>", "</ADDITIONAL_METADATA>"),
+            ("<USER_SETTINGS_CHANGE>", "</USER_SETTINGS_CHANGE>"),
+            ("<SYSTEM_MESSAGE>", "</SYSTEM_MESSAGE>"),
+            ("<EPHEMERAL_MESSAGE>", "</EPHEMERAL_MESSAGE>"),
+        ];
+        for (open_tag, close_tag) in tags_to_strip {
+            while let Some(start) = s.find(open_tag) {
+                if let Some(end_rel) = s[start..].find(close_tag) {
+                    let end = start + end_rel + close_tag.len();
+                    s.replace_range(start..end, "");
+                } else {
+                    s.replace_range(start.., "");
+                }
+            }
+        }
+
+        // Strip stray boilerplate notice lines
+        let filtered_lines: Vec<&str> = s
+            .lines()
+            .filter(|line| {
+                let t = line.trim();
+                !t.starts_with("The following is a <SYSTEM_MESSAGE>")
+                    && !t.starts_with("The following is an <EPHEMERAL_MESSAGE>")
+                    && t != "<USER_REQUEST>"
+                    && t != "</USER_REQUEST>"
+            })
+            .collect();
+
+        filtered_lines.join("\n").trim().to_string()
+    }
+
+    fn clean_arg_string(val: &Value) -> Option<String> {
+        let raw = val.as_str()?.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        if raw.starts_with('"') && raw.ends_with('"') && raw.len() >= 2 {
+            if let Ok(decoded) = serde_json::from_str::<String>(raw) {
+                return Some(decoded.trim().to_string());
+            }
+            return Some(raw.trim_matches('"').replace("\\\\", "\\").replace("\\\"", "\""));
+        }
+        Some(raw.to_string())
+    }
+
+    fn extract_tool_target(tool_name: &str, args: Option<&Value>) -> Option<String> {
+        let a = args?;
+        if let Some(path) = a
+            .get("AbsolutePath")
+            .or_else(|| a.get("TargetFile"))
+            .or_else(|| a.get("File"))
+            .or_else(|| a.get("DirectoryPath"))
+            .or_else(|| a.get("SearchPath"))
+            .and_then(Self::clean_arg_string)
+        {
+            let start = a.get("StartLine").and_then(Self::clean_arg_string);
+            let end = a.get("EndLine").and_then(Self::clean_arg_string);
+            return match (start, end) {
+                (Some(s), Some(e)) => Some(format!("{path}#L{s}-{e}")),
+                (Some(s), None) => Some(format!("{path}#L{s}")),
+                _ => Some(path),
+            };
+        }
+
+        if let Some(cmd) = a.get("CommandLine").and_then(Self::clean_arg_string) {
+            let clean_cmd = if cmd.chars().count() > 90 {
+                let trunc: String = cmd.chars().take(87).collect();
+                format!("{trunc}...")
+            } else {
+                cmd
+            };
+            return Some(clean_cmd);
+        }
+
+        if tool_name == "call_mcp_tool" {
+            let srv = a.get("ServerName").and_then(Self::clean_arg_string).unwrap_or_default();
+            let tname = a.get("ToolName").and_then(Self::clean_arg_string).unwrap_or_default();
+            if !srv.is_empty() || !tname.is_empty() {
+                return Some(format!("{srv}:{tname}"));
+            }
+        }
+
+        if let Some(q) = a
+            .get("Query")
+            .or_else(|| a.get("Pattern"))
+            .or_else(|| a.get("query"))
+            .or_else(|| a.get("Url"))
+            .and_then(Self::clean_arg_string)
+        {
+            return Some(q);
+        }
+
+        None
+    }
+
+    pub fn summarize_tool_output(raw: &str) -> (String, String) {
+        let trimmed = raw.trim();
+        let is_err = trimmed.contains("The command exited with code 1")
+            || trimmed.starts_with("Error:")
+            || trimmed.starts_with("Traceback (most recent call last):");
+        let status = if is_err { "ERROR".to_string() } else { "DONE".to_string() };
+
+        // Strip verbose line-number boilerplate injected by view_file
+        let boilerplate = "The following code has been modified to include a line number before every line, in the format: <line_number>: <original_line>. Please note that any changes targeting the original code should remove the line number, colon, and leading space.";
+        let cleaned = trimmed.replace(boilerplate, "").trim().to_string();
+
+        let max_chars = 2400;
+        let final_out = if cleaned.chars().count() > max_chars {
+            let head: String = cleaned.chars().take(max_chars).collect();
+            format!("{head}\n... [truncated for mobile view]")
+        } else {
+            cleaned
+        };
+
+        (status, final_out)
+    }
+
     fn inspect_transcript_summary(transcript_path: &Path) -> (usize, Option<String>) {
         let mut count = 0;
         let mut snippet = None;
@@ -212,20 +345,20 @@ impl AntigravityWatcher {
                     if !trimmed.is_empty() {
                         count += 1;
                         if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
-                            if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
-                                let clean = content
-                                    .trim_start_matches("<USER_REQUEST>")
-                                    .trim_end_matches("</USER_REQUEST>")
-                                    .trim();
-                                if !clean.is_empty() && !clean.starts_with('<') {
-                                    let s = if clean.chars().count() > 85 {
-                                        let trunc: String = clean.chars().take(82).collect();
-                                        format!("{trunc}...")
-                                    } else {
-                                        clean.to_string()
-                                    };
-                                    // Retain the latest user message snippet for preview
-                                    snippet = Some(s);
+                            let step_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                            if step_type == "USER_INPUT" || step_type == "PLANNER_RESPONSE" {
+                                if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
+                                    let clean = Self::clean_user_prompt(content);
+                                    if !clean.is_empty() && !clean.starts_with('<') {
+                                        let first_line = clean.lines().next().unwrap_or(&clean).trim();
+                                        let s = if first_line.chars().count() > 85 {
+                                            let trunc: String = first_line.chars().take(82).collect();
+                                            format!("{trunc}...")
+                                        } else {
+                                            first_line.to_string()
+                                        };
+                                        snippet = Some(s);
+                                    }
                                 }
                             }
                         }
@@ -276,6 +409,13 @@ impl AntigravityWatcher {
         candidates
     }
 
+    pub fn detect_project_and_title_for_conv(conv_id: &str, base_brain_dir: &Path) -> (String, String) {
+        let conv_dir = base_brain_dir.join(conv_id);
+        let transcript_path = conv_dir.join(".system_generated").join("logs").join("transcript.jsonl");
+        let live_projects = Self::discover_live_projects();
+        Self::detect_project_and_title(conv_id, &conv_dir, &transcript_path, &live_projects)
+    }
+
     fn detect_project_and_title(
         conv_id: &str,
         conv_dir: &Path,
@@ -311,7 +451,7 @@ impl AntigravityWatcher {
         // 2. Inspect first lines of transcript.jsonl for workspace/project indicators
         if let Ok(file) = File::open(transcript_path) {
             let reader = BufReader::new(file);
-            for line_res in reader.lines().take(25) {
+            for line_res in reader.lines().take(35) {
                 if let Ok(line) = line_res {
                     let lower = line.to_lowercase();
                     
@@ -330,24 +470,20 @@ impl AntigravityWatcher {
                     // Extract title from first user prompt if still default
                     if conv_title.starts_with("Session ") {
                         if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                            let is_user = v.get("source").and_then(|s| s.as_str()).map(|s| s.starts_with("USER")).unwrap_or(false);
+                            let is_user = v.get("source").and_then(|s| s.as_str()).map(|s| s.starts_with("USER")).unwrap_or(false)
+                                || v.get("type").and_then(|t| t.as_str()) == Some("USER_INPUT");
                             if is_user {
                                 if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
-                                    for cl in content.lines() {
-                                        let t = cl.trim()
-                                            .trim_start_matches("<USER_REQUEST>")
-                                            .trim_end_matches("</USER_REQUEST>")
-                                            .trim();
-                                        if !t.is_empty() && !t.starts_with('<') {
-                                            let clean = if t.chars().count() > 60 {
-                                                let trunc: String = t.chars().take(57).collect();
-                                                format!("{trunc}...")
-                                            } else {
-                                                t.to_string()
-                                            };
-                                            conv_title = clean;
-                                            break;
-                                        }
+                                    let cleaned = Self::clean_user_prompt(content);
+                                    if let Some(first_line) = cleaned.lines().find(|l| !l.trim().is_empty()) {
+                                        let t = first_line.trim();
+                                        let clean = if t.chars().count() > 60 {
+                                            let trunc: String = t.chars().take(57).collect();
+                                            format!("{trunc}...")
+                                        } else {
+                                            t.to_string()
+                                        };
+                                        conv_title = clean;
                                     }
                                 }
                             }
@@ -366,8 +502,20 @@ impl AntigravityWatcher {
             Err(_) => return,
         };
 
+        let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
         let mut reader = BufReader::new(file);
-        if reader.seek(SeekFrom::Start(tracker.last_file_position)).is_err() {
+
+        // On initial attach to a huge transcript file (> 1MB), seek to the last 768KB
+        // so startup is instantaneous and doesn't flood 4,000+ historical broadcasts.
+        if tracker.last_file_position == 0 && file_len > 768 * 1024 {
+            let seek_pos = file_len - (768 * 1024);
+            if reader.seek(SeekFrom::Start(seek_pos)).is_ok() {
+                let mut discard = String::new();
+                if let Ok(n) = reader.read_line(&mut discard) {
+                    tracker.last_file_position = seek_pos + n as u64;
+                }
+            }
+        } else if reader.seek(SeekFrom::Start(tracker.last_file_position)).is_err() {
             return;
         }
 
@@ -398,47 +546,100 @@ impl AntigravityWatcher {
 
     pub fn parse_json_step(v: &Value, conv_id: &str) -> Option<ChatStep> {
         let step_index = v.get("step_index").and_then(|x| x.as_u64()).unwrap_or(0);
-        let source = v.get("source").and_then(|x| x.as_str()).unwrap_or("SYSTEM").to_string();
-        let step_type = v.get("type").and_then(|x| x.as_str()).unwrap_or("STEP").to_string();
+        let raw_source = v.get("source").and_then(|x| x.as_str()).unwrap_or("SYSTEM");
+        let raw_type = v.get("type").and_then(|x| x.as_str()).unwrap_or("STEP");
         let status = v.get("status").and_then(|x| x.as_str()).unwrap_or("DONE").to_string();
         let timestamp = v.get("created_at")
             .and_then(|x| x.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| Local::now().to_rfc3339());
 
-        let content = v.get("content").and_then(|x| x.as_str()).map(|s| s.to_string());
-        let thinking = v.get("thinking").and_then(|x| x.as_str()).map(|s| s.to_string());
+        // Skip internal context compaction checkpoints and background system noise
+        if raw_type == "CHECKPOINT" || raw_type == "SYSTEM_MESSAGE" {
+            return None;
+        }
+
+        let is_user = raw_source.starts_with("USER") || raw_type == "USER_INPUT";
+        let source = if is_user {
+            "USER".to_string()
+        } else if raw_source == "MODEL" {
+            "MODEL".to_string()
+        } else {
+            "SYSTEM".to_string()
+        };
+
+        let step_type = if is_user {
+            "USER_INPUT".to_string()
+        } else if raw_type == "GENERIC" {
+            "TOOL_OUTPUT".to_string()
+        } else {
+            raw_type.to_string()
+        };
+
+        let raw_content = v.get("content").and_then(|x| x.as_str());
+        let content = if is_user {
+            let cleaned = raw_content.map(Self::clean_user_prompt).unwrap_or_default();
+            if cleaned.is_empty() {
+                return None;
+            }
+            Some(cleaned)
+        } else if step_type == "TOOL_OUTPUT" {
+            raw_content.map(|c| Self::summarize_tool_output(c).1)
+        } else {
+            raw_content.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+        };
+
+        let thinking = v
+            .get("thinking")
+            .and_then(|x| x.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        let input_tokens = v.get("input_tokens").and_then(|x| x.as_u64());
+        let output_tokens = v.get("output_tokens").and_then(|x| x.as_u64());
+        let cache_read_tokens = v.get("cache_read_tokens").and_then(|x| x.as_u64());
 
         let mut tool_calls = Vec::new();
         if let Some(calls) = v.get("tool_calls").and_then(|x| x.as_array()) {
             for call in calls {
-                let name = call.get("name").and_then(|x| x.as_str()).unwrap_or("unknown_tool").to_string();
+                let name = call
+                    .get("name")
+                    .and_then(Self::clean_arg_string)
+                    .unwrap_or_else(|| "unknown_tool".to_string());
                 let args = call.get("args").cloned();
-                
-                let summary = args.as_ref()
-                    .and_then(|a| a.get("toolSummary"))
-                    .and_then(|s| s.as_str())
-                    .unwrap_or("")
-                    .to_string();
 
-                let action = args.as_ref()
+                let summary = args
+                    .as_ref()
+                    .and_then(|a| a.get("toolSummary"))
+                    .and_then(Self::clean_arg_string)
+                    .unwrap_or_default();
+
+                let action = args
+                    .as_ref()
                     .and_then(|a| a.get("toolAction"))
-                    .and_then(|s| s.as_str())
-                    .unwrap_or("")
-                    .to_string();
+                    .and_then(Self::clean_arg_string)
+                    .unwrap_or_default();
+
+                let target_file = Self::extract_tool_target(&name, args.as_ref());
 
                 tool_calls.push(ToolCallInfo {
                     tool_name: name,
                     action,
                     summary,
+                    target_file,
+                    status: Some("DONE".to_string()),
                     arguments: args,
                     output: None,
                 });
             }
         }
 
-        let tool_calls_opt = if tool_calls.is_empty() { None } else { Some(tool_calls) };
+        // Ignore completely empty PLANNER_RESPONSE steps
+        if !is_user && step_type != "TOOL_OUTPUT" && content.is_none() && thinking.is_none() && tool_calls.is_empty() {
+            return None;
+        }
 
+        let tool_calls_opt = if tool_calls.is_empty() { None } else { Some(tool_calls) };
         let short_id = if conv_id.len() >= 8 { &conv_id[..8] } else { conv_id };
 
         Some(ChatStep {
@@ -455,6 +656,9 @@ impl AntigravityWatcher {
             project_name: None,
             conversation_id: None,
             conversation_title: None,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
         })
     }
 

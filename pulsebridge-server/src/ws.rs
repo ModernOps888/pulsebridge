@@ -195,7 +195,12 @@ async fn handle_socket(socket: WebSocket, state: SharedState, initial_token: Opt
                             }
                         }
                         WsClientMessage::EmergencyStop => {
-                            state_for_reader.send_alert("warning", "Emergency Stop Triggered", "User pressed Stop from phone");
+                            let win_res = crate::remote_action::RemoteActionDispatcher::trigger_emergency_stop();
+                            let detail = match win_res {
+                                Ok(w) => format!("Sent Esc + Ctrl+C to '{w}'"),
+                                Err(e) => format!("Stop signal triggered ({e})"),
+                            };
+                            state_for_reader.send_alert("warning", "Emergency Stop Triggered", &detail);
                         }
                     }
                 }

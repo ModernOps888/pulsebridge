@@ -1,20 +1,19 @@
 @echo off
+setlocal
 title PulseBridge Core Server
 cls
-echo ========================================================
-echo   Launching PulseBridge - Universal AI IDE Companion
-echo   Supported: Antigravity, Cursor AI, VS Code, Visual Studio
-echo ========================================================
+
+echo ====================================================================
+echo   PULSEBRIDGE - UNIVERSAL AI IDE COMPANION
+echo   Launching Full Stack: Rust Backend + React Mobile Web + 4G Tunnel
+echo ====================================================================
 echo.
 
-cd /d "%~dp0\..\pulsebridge-server"
-if exist "target\release\pulsebridge-server.exe" (
-    "target\release\pulsebridge-server.exe" --port 8080
-) else if exist "target\debug\pulsebridge-server.exe" (
-    "target\debug\pulsebridge-server.exe" --port 8080
-) else (
-    echo Building PulseBridge Rust server binary...
-    cargo run -- --port 8080
-)
+cd /d "%~dp0\.."
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-bridge.ps1" %*
 
-pause
+if %ERRORLEVEL% neq 0 (
+    echo.
+    echo [!] Process exited with status code %ERRORLEVEL%.
+    pause
+)

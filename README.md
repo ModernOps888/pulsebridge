@@ -186,8 +186,8 @@ The terminal displays your host LAN IP, the dynamic 6-digit PIN, and an ASCII QR
 
   [+] Host LAN IP : 192.168.1.150
   [+] Active Port : 8080
-  [+] Session PIN : 778899
-  [+] QR Pairing  : http://192.168.1.150:8080?pin=778899
+  [+] Session PIN : 000000
+  [+] QR Pairing  : http://192.168.1.150:8080?pin=000000
 ```
 
 ### 2. Connect Your Smartphone

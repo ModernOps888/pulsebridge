@@ -4,7 +4,7 @@ import sys
 import time
 
 BASE_URL = "http://127.0.0.1:8080"
-PIN = sys.argv[1] if len(sys.argv) > 1 else "778899"
+PIN = sys.argv[1] if len(sys.argv) > 1 else "000000"
 
 print("=========================================================================")
 print("     MULTI-PROJECT & MULTI-CHAT DEEP FUNCTIONAL VERIFICATION SUITE       ")

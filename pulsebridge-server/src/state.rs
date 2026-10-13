@@ -109,6 +109,34 @@ impl SharedState {
     }
 
     pub fn add_chat_step(&self, step: ChatStep) {
+        // If this is a TOOL_OUTPUT step, attempt to attach its output to the first pending ToolCallInfo
+        // in the most recent PLANNER_RESPONSE step for the same conversation.
+        if step.step_type == "TOOL_OUTPUT" {
+            let mut updated_parent: Option<ChatStep> = None;
+            {
+                let mut steps = self.inner.recent_steps.write();
+                for existing in steps.iter_mut().rev() {
+                    if existing.conversation_id == step.conversation_id
+                        && existing.step_type == "PLANNER_RESPONSE"
+                    {
+                        if let Some(ref mut calls) = existing.tool_calls {
+                            if let Some(pending_call) = calls.iter_mut().find(|tc| tc.output.is_none()) {
+                                pending_call.output = step.content.clone();
+                                pending_call.status = Some(step.status.clone());
+                                updated_parent = Some(existing.clone());
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(parent_step) = updated_parent {
+                self.broadcast(WsServerMessage::StepAdded(parent_step));
+                return;
+            }
+        }
+
         {
             let mut steps = self.inner.recent_steps.write();
             // Check if step already exists (avoid duplicate on re-read)
@@ -150,7 +178,7 @@ impl SharedState {
                 status: "active".to_string(),
                 project_path: Some(format!("C:\\{}", proj_name)),
             });
-            entry.step_count += 1;
+            entry.step_count = (step.step_index as usize).max(entry.step_count + 1);
             entry.last_updated = step.timestamp.clone();
             if let Some(snip) = snippet {
                 entry.latest_message_snippet = Some(snip);
@@ -173,6 +201,8 @@ impl SharedState {
             }
         } else if step.source == "USER" {
             "Analyzing new user prompt".to_string()
+        } else if step.content.is_some() {
+            "Response delivered — ready for input".to_string()
         } else if step.thinking.is_some() {
             "Reasoning & planning next steps".to_string()
         } else {
@@ -192,7 +222,7 @@ impl SharedState {
         };
 
         self.update_task_progress(|p| {
-            p.total_steps += 1;
+            p.total_steps = (step.step_index as usize).max(p.total_steps + 1);
             p.current_step_desc = step_desc;
             p.status = new_status;
             p.active_ide = step.ide.clone();

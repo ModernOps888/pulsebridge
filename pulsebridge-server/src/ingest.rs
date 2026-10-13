@@ -79,6 +79,8 @@ pub async fn handle_ingest_event(
             summary: payload.content.clone().unwrap_or_default(),
             arguments: None,
             output: None,
+            target_file: None,
+            status: Some("DONE".to_string()),
         }])
     } else {
         None
@@ -98,6 +100,9 @@ pub async fn handle_ingest_event(
         project_name: payload.project_name,
         conversation_id: payload.conversation_id,
         conversation_title: payload.conversation_title,
+        input_tokens: None,
+        output_tokens: None,
+        cache_read_tokens: None,
     };
 
     state.add_chat_step(step);
@@ -126,7 +131,7 @@ pub async fn handle_send_prompt(
         message: payload.message,
         target_ide: ide_source,
         action_mode: Some(crate::remote_action::RemoteActionMode::InjectWindow),
-        project_path: None,
+        project_path: payload.target_project,
         command: None,
     };
 
@@ -168,7 +173,21 @@ pub async fn handle_hotkey(
 ) -> Result<impl IntoResponse, StatusCode> {
     verify_auth(&state, &headers, query.token.as_deref())?;
 
-    match crate::remote_action::RemoteActionDispatcher::simulate_hotkey(&payload.key) {
+    match crate::remote_action::RemoteActionDispatcher::simulate_hotkey(&payload.key, payload.window_id) {
+        Ok(_) => Ok((StatusCode::OK, Json(json!({ "success": true })))),
+        Err(e) => Ok((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "success": false, "error": e })))),
+    }
+}
+
+pub async fn handle_type_text(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(query): Query<AuthHeaderQuery>,
+    Json(payload): Json<crate::remote_action::TypeTextCommand>,
+) -> Result<impl IntoResponse, StatusCode> {
+    verify_auth(&state, &headers, query.token.as_deref())?;
+
+    match crate::remote_action::RemoteActionDispatcher::simulate_type_text(payload) {
         Ok(_) => Ok((StatusCode::OK, Json(json!({ "success": true })))),
         Err(e) => Ok((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "success": false, "error": e })))),
     }
