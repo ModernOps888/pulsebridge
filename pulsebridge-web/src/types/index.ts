@@ -89,6 +89,14 @@ export interface SystemTelemetry {
   server_port: number
   active_ide_name: string
   uptime_seconds: number
+  shell_commands_enabled?: boolean
+}
+
+export interface PromptContextOptions {
+  targetIde?: IdeSource
+  projectName?: string
+  conversationId?: string
+  projectPath?: string
 }
 
 export interface IdeWindowInfo {

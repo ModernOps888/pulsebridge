@@ -6,9 +6,38 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
 import fs from 'fs'
+import os from 'os'
 import path from 'path'
+import { fileURLToPath } from 'url'
 
 const BRIDGE_URL = process.env.PULSEBRIDGE_URL || 'http://127.0.0.1:8080'
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
+
+function resolveAuthToken() {
+  if (process.env.PULSEBRIDGE_TOKEN) {
+    return process.env.PULSEBRIDGE_TOKEN.trim()
+  }
+  try {
+    const tokenFile = path.join(os.tmpdir(), 'pulsebridge_tokens.json')
+    if (fs.existsSync(tokenFile)) {
+      const parsed = JSON.parse(fs.readFileSync(tokenFile, 'utf8'))
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed[parsed.length - 1]
+      }
+    }
+  } catch (_) {}
+  return ''
+}
+
+function getAuthHeaders() {
+  const token = resolveAuthToken()
+  const headers = { 'Content-Type': 'application/json' }
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+  return headers
+}
 
 const server = new Server(
   {
@@ -99,8 +128,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     try {
       const res = await fetch(`${BRIDGE_URL}/api/ingest/event`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({
+          ide: 'antigravity',
           event_type: 'alert',
           content: args.message,
           task_title: args.title,
@@ -130,8 +160,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     try {
       const res = await fetch(`${BRIDGE_URL}/api/ingest/event`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({
+          ide: 'antigravity',
           event_type: 'status',
           task_title: args.task_title,
           content: args.current_step,
@@ -139,6 +170,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           status: args.status,
         }),
       })
+
+      if (!res.ok) {
+        return {
+          content: [{ type: 'text', text: `Bridge rejected status update with HTTP ${res.status}` }],
+          isError: true,
+        }
+      }
 
       return {
         content: [{ type: 'text', text: `Task progress updated on phone (${args.percent_complete ?? 50}%).` }],
@@ -157,12 +195,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         Array.isArray(args.options) && args.options.length > 0 ? args.options : ['Approve', 'Reject']
       const optionsTag = `\n[OPTIONS: ${options.join(' | ')}]`
       const fullMessage = `${args.question}${optionsTag}`
+      const headers = getAuthHeaders()
 
       // Post chat event step
-      await fetch(`${BRIDGE_URL}/api/ingest/event`, {
+      const stepRes = await fetch(`${BRIDGE_URL}/api/ingest/event`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
+          ide: 'antigravity',
           event_type: 'step',
           step_type: 'ASK_QUESTION',
           content: fullMessage,
@@ -177,11 +217,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }),
       })
 
+      if (!stepRes.ok) {
+        return {
+          content: [{ type: 'text', text: `Bridge rejected ask_phone step with HTTP ${stepRes.status}` }],
+          isError: true,
+        }
+      }
+
       // Also trigger a high-priority alert chime on the phone
       await fetch(`${BRIDGE_URL}/api/ingest/event`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
+          ide: 'antigravity',
           event_type: 'alert',
           content: args.question,
           task_title: 'Decision Required from Phone',
@@ -209,24 +257,49 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   if (name === 'check_phone_inbox') {
     try {
-      const userProfile = process.env.USERPROFILE || 'C:\\Users\\Default'
-      const brainInbox = path.join(userProfile, '.gemini', 'antigravity', 'brain', 'forge-inbox')
-      const baseDir = process.env.PULSEBRIDGE_DIR || path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
-      const localInbox = path.join(baseDir, '.inbox', 'latest_prompt.txt')
-
       const messages = []
 
-      if (fs.existsSync(localInbox)) {
-        const text = fs.readFileSync(localInbox, 'utf8').trim()
-        if (text) {
-          messages.push({ source: 'phone_quick_prompt', text })
+      // 1. Query live authenticated in-memory inbox queue on PulseBridge server
+      try {
+        const res = await fetch(`${BRIDGE_URL}/api/inbox?unread_only=true&ack=true`, {
+          method: 'GET',
+          headers: getAuthHeaders(),
+        })
+        if (res.ok) {
+          const data = await res.json()
+          if (Array.isArray(data.messages) && data.messages.length > 0) {
+            for (const m of data.messages) {
+              messages.push({
+                source: 'pulsebridge_live_inbox',
+                id: m.id,
+                timestamp: m.timestamp,
+                ide: m.target_ide,
+                project_name: m.project_name,
+                conversation_id: m.conversation_id,
+                prompt: m.message,
+              })
+            }
+          }
         }
-      }
+      } catch (_) {}
 
-      if (fs.existsSync(brainInbox)) {
-        const files = fs.readdirSync(brainInbox)
-        for (const file of files) {
-          if (file.endsWith('.json')) {
+      // 2. Fallback to file-based inbox if live server queue had no unread items
+      if (messages.length === 0) {
+        const userProfile = process.env.USERPROFILE || 'C:\\Users\\Default'
+        const brainInbox = path.join(userProfile, '.gemini', 'antigravity', 'brain', 'forge-inbox')
+        const baseDir = process.env.PULSEBRIDGE_DIR || path.resolve(__dirname, '..')
+        const localInbox = path.join(baseDir, '.inbox', 'latest_prompt.txt')
+
+        if (fs.existsSync(localInbox)) {
+          const text = fs.readFileSync(localInbox, 'utf8').trim()
+          if (text) {
+            messages.push({ source: 'phone_quick_prompt', text })
+          }
+        }
+
+        if (fs.existsSync(brainInbox)) {
+          const files = fs.readdirSync(brainInbox).filter((f) => f.endsWith('.json')).sort().slice(-10)
+          for (const file of files) {
             try {
               const content = JSON.parse(fs.readFileSync(path.join(brainInbox, file), 'utf8'))
               messages.push(content)

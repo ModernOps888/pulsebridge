@@ -23,6 +23,7 @@ pub struct AntigravityWatcher {
     base_brain_dir: PathBuf,
     tracked: HashMap<String, TrackedConversation>,
     most_recent_conv_id: Option<String>,
+    last_task_mtime: Option<SystemTime>,
     has_indexed_history: bool,
 }
 
@@ -38,6 +39,7 @@ impl AntigravityWatcher {
             base_brain_dir,
             tracked: HashMap::new(),
             most_recent_conv_id: None,
+            last_task_mtime: None,
             has_indexed_history: false,
         }
     }
@@ -64,7 +66,9 @@ impl AntigravityWatcher {
         if is_new_top {
             info!("AntigravityWatcher: Active session switched to {}", top_conv_id);
             self.most_recent_conv_id = Some(top_conv_id.clone());
-            self.parse_task_progress(top_conv_id, state);
+            self.last_task_mtime = None;
+            let top_clone = top_conv_id.clone();
+            self.parse_task_progress(&top_clone, state);
         }
 
         let live_projects = Self::discover_live_projects();
@@ -111,9 +115,9 @@ impl AntigravityWatcher {
             }
         }
 
-        // Keep top task milestones refreshed
-        if let Some(ref top_id) = self.most_recent_conv_id {
-            self.parse_task_progress(top_id, state);
+        // Keep top task milestones refreshed when task.md / implementation_plan.md changes
+        if let Some(top_id) = self.most_recent_conv_id.clone() {
+            self.parse_task_progress(&top_id, state);
         }
     }
 
@@ -179,8 +183,16 @@ impl AntigravityWatcher {
                         let name = entry.file_name().to_string_lossy().to_string();
                         if !name.starts_with('.') && !ignored.iter().any(|&ign| ign.eq_ignore_ascii_case(&name)) {
                             let path = entry.path();
-                            let mod_time = path.metadata().and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
-                            // Only include projects modified within the last 30 days
+                            let mut mod_time = path.metadata().and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+                            if mod_time < cutoff {
+                                // Check .git/HEAD or .git/index mtime on NTFS where root folder mtime does not update on child edits
+                                let git_index = path.join(".git").join("index");
+                                if let Ok(gm) = git_index.metadata().and_then(|m| m.modified()) {
+                                    if gm > mod_time {
+                                        mod_time = gm;
+                                    }
+                                }
+                            }
                             if mod_time >= cutoff {
                                 projects.push((name, path.to_string_lossy().to_string(), mod_time));
                             }
@@ -266,6 +278,7 @@ impl AntigravityWatcher {
         let a = args?;
         if let Some(path) = a
             .get("AbsolutePath")
+            .or_else(|| a.get("Path"))
             .or_else(|| a.get("TargetFile"))
             .or_else(|| a.get("File"))
             .or_else(|| a.get("DirectoryPath"))
@@ -662,7 +675,7 @@ impl AntigravityWatcher {
         })
     }
 
-    fn parse_task_progress(&self, conv_id: &str, state: &SharedState) {
+    fn parse_task_progress(&mut self, conv_id: &str, state: &SharedState) {
         let conv_dir = self.base_brain_dir.join(conv_id);
         let task_file = conv_dir.join("task.md");
         let impl_file = conv_dir.join("implementation_plan.md");
@@ -674,6 +687,16 @@ impl AntigravityWatcher {
         } else {
             None
         };
+
+        let current_mtime = target_file
+            .as_ref()
+            .and_then(|f| f.metadata().ok())
+            .and_then(|m| m.modified().ok());
+
+        if self.last_task_mtime.is_some() && self.last_task_mtime == current_mtime {
+            return;
+        }
+        self.last_task_mtime = current_mtime;
 
         let mut milestones = Vec::new();
         let mut task_title = format!("Active Session ({})", &conv_id[..conv_id.len().min(8)]);

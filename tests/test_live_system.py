@@ -1,9 +1,10 @@
+import os
 import json
 import urllib.request
 import urllib.parse
 import sys
 
-BASE_URL = "http://localhost:8080"
+BASE_URL = os.environ.get("PULSEBRIDGE_URL", "http://localhost:8080")
 PIN = sys.argv[1] if len(sys.argv) > 1 else "000000"
 
 def test_endpoints():

@@ -59,6 +59,16 @@ impl TelemetryCollector {
             }
         }
 
+        let mut current_ide = self.active_ide.read().clone();
+        if current_ide == "Auto-detecting..." {
+            let wins = crate::capture::ScreenCapturer::list_ide_windows();
+            if let Some(w) = wins.into_iter().find(|w| w.ide != crate::models::IdeSource::Custom) {
+                current_ide = w.ide.to_string();
+            } else {
+                current_ide = "Antigravity".to_string();
+            }
+        }
+
         SystemTelemetry {
             hostname: self.hostname.clone(),
             os: "Windows 11 / 10".to_string(),
@@ -69,8 +79,9 @@ impl TelemetryCollector {
             is_charging,
             lan_ip: self.lan_ip.clone(),
             server_port: self.port,
-            active_ide_name: self.active_ide.read().clone(),
+            active_ide_name: current_ide,
             uptime_seconds: self.start_time.elapsed().as_secs(),
+            shell_commands_enabled: None,
         }
     }
 }

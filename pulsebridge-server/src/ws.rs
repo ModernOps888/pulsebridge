@@ -126,25 +126,41 @@ async fn handle_socket(socket: WebSocket, state: SharedState, initial_token: Opt
     while let Some(Ok(msg)) = receiver.next().await {
         match msg {
             Message::Text(text) => {
-                if let Ok(client_msg) = serde_json::from_str::<WsClientMessage>(&text) {
+                // Support both unit and empty-object payloads for emergency_stop / ping
+                let parsed_msg = serde_json::from_str::<WsClientMessage>(&text).or_else(|e| {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                        match v.get("type").and_then(|t| t.as_str()) {
+                            Some("emergency_stop") => Ok(WsClientMessage::EmergencyStop),
+                            Some("ping") => Ok(WsClientMessage::Ping),
+                            _ => Err(e),
+                        }
+                    } else {
+                        Err(e)
+                    }
+                });
+
+                if let Ok(client_msg) = parsed_msg {
                     match client_msg {
                         WsClientMessage::Auth { token } => {
                             if state_for_reader.auth().is_token_valid(&token) {
+                                let already_authed = is_authenticated;
                                 is_authenticated = true;
                                 auth_flag.store(true, Ordering::Relaxed);
                                 let resp = WsServerMessage::AuthResponse {
                                     success: true,
                                     message: "Access granted".to_string(),
                                 };
-                                let init = WsServerMessage::InitialState {
-                                    task: state_for_reader.get_task_progress(),
-                                    recent_steps: state_for_reader.get_recent_steps(),
-                                    telemetry: state_for_reader.get_telemetry(),
-                                    windows: ScreenCapturer::list_ide_windows(),
-                                    projects: state_for_reader.get_project_chats(),
-                                };
                                 let _ = ws_out_tx.send(Message::Text(serde_json::to_string(&resp).unwrap()));
-                                let _ = ws_out_tx.send(Message::Text(serde_json::to_string(&init).unwrap()));
+                                if !already_authed {
+                                    let init = WsServerMessage::InitialState {
+                                        task: state_for_reader.get_task_progress(),
+                                        recent_steps: state_for_reader.get_recent_steps(),
+                                        telemetry: state_for_reader.get_telemetry(),
+                                        windows: ScreenCapturer::list_ide_windows(),
+                                        projects: state_for_reader.get_project_chats(),
+                                    };
+                                    let _ = ws_out_tx.send(Message::Text(serde_json::to_string(&init).unwrap()));
+                                }
                             } else {
                                 let resp = WsServerMessage::AuthResponse {
                                     success: false,
@@ -164,14 +180,22 @@ async fn handle_socket(socket: WebSocket, state: SharedState, initial_token: Opt
                             };
                             let _ = ws_out_tx.send(Message::Text(serde_json::to_string(&resp).unwrap()));
                         }
-                        WsClientMessage::SendPrompt { message, target_ide } => {
+                        WsClientMessage::SendPrompt {
+                            message,
+                            target_ide,
+                            project_name,
+                            conversation_id,
+                            project_path,
+                        } => {
                             let ide = target_ide.unwrap_or(IdeSource::Antigravity);
                             let cmd = crate::remote_action::RemotePromptCommand {
                                 message,
                                 target_ide: Some(ide),
                                 action_mode: Some(crate::remote_action::RemoteActionMode::InjectWindow),
-                                project_path: None,
+                                project_path,
                                 command: None,
+                                project_name,
+                                conversation_id,
                             };
                             crate::remote_action::RemoteActionDispatcher::dispatch(cmd, &state_for_reader).await;
                         }

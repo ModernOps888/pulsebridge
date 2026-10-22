@@ -20,17 +20,24 @@ $relExe = Join-Path $serverDir "target\release\pulsebridge-server.exe"
 $dbgExe = Join-Path $serverDir "target\debug\pulsebridge-server.exe"
 $cloudflaredExe = Join-Path $PSScriptRoot "cloudflared.exe"
 
-# 1. Clean up any stale instances on the target port
+# 1. Clean up any stale pulsebridge-server instances on the target port (never kill unrelated services)
 $staleConns = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
 if ($staleConns) {
     foreach ($conn in $staleConns) {
         $pidToKill = $conn.OwningProcess
         if ($pidToKill -and $pidToKill -gt 0) {
-            Write-Host "[*] Freeing occupied port $Port (terminating PID $pidToKill)..." -ForegroundColor Yellow
-            Stop-Process -Id $pidToKill -Force -ErrorAction SilentlyContinue
+            $proc = Get-Process -Id $pidToKill -ErrorAction SilentlyContinue
+            if ($proc -and $proc.ProcessName -like "*pulsebridge*") {
+                Write-Host "[*] Stopping previous PulseBridge instance on port $Port (PID $pidToKill)..." -ForegroundColor Yellow
+                Stop-Process -Id $pidToKill -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Milliseconds 400
+            } else {
+                $procName = if ($proc) { $proc.ProcessName } else { "PID $pidToKill" }
+                Write-Host "[!] Port $Port is in use by '$procName'. Switching PulseBridge to port 8765..." -ForegroundColor Yellow
+                $Port = 8765
+            }
         }
     }
-    Start-Sleep -Milliseconds 400
 }
 
 # 2. Verify Frontend Dist exists (Build if missing)

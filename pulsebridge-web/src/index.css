@@ -47,7 +47,6 @@ body {
 /* Dedicated High-DPI Zoomed Viewport Scroll Container */
 .viewport-zoom-scroll {
   -webkit-overflow-scrolling: touch;
-  scroll-behavior: smooth;
   scrollbar-width: auto;
   scrollbar-color: #facc15 #050806;
   overscroll-behavior: contain;

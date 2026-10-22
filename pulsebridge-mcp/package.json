@@ -1,6 +1,6 @@
 {
   "name": "pulsebridge-mcp",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Model Context Protocol Server for PulseBridge Remote Phone Companion",
   "main": "index.mjs",
   "type": "module",

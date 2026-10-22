@@ -14,7 +14,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId,
-    SetCursorPos, SetForegroundWindow, ShowWindow, SW_RESTORE,
+    IsIconic, SetCursorPos, SetForegroundWindow, ShowWindow, SW_RESTORE,
 };
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 
@@ -46,6 +46,7 @@ extern "system" {
     fn GlobalAlloc(uFlags: u32, dwBytes: usize) -> isize;
     fn GlobalLock(hMem: isize) -> *mut std::ffi::c_void;
     fn GlobalUnlock(hMem: isize) -> BOOL;
+    fn GlobalFree(hMem: isize) -> isize;
 }
 
 pub fn set_clipboard_text(text: &str) -> bool {
@@ -58,19 +59,58 @@ pub fn set_clipboard_text(text: &str) -> bool {
         }
         let ptr = GlobalLock(hmem) as *mut u16;
         if ptr.is_null() {
+            let _ = GlobalFree(hmem);
             return false;
         }
         std::ptr::copy_nonoverlapping(utf16.as_ptr(), ptr, utf16.len());
         GlobalUnlock(hmem);
 
-        if OpenClipboard(0) == 0 {
+        let mut opened = false;
+        for _ in 0..5 {
+            if OpenClipboard(0) != 0 {
+                opened = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !opened {
+            let _ = GlobalFree(hmem);
             return false;
         }
         EmptyClipboard();
         const CF_UNICODETEXT: u32 = 13;
         let res = SetClipboardData(CF_UNICODETEXT, hmem);
         CloseClipboard();
-        res != 0
+        if res == 0 {
+            let _ = GlobalFree(hmem);
+            return false;
+        }
+        true
+    }
+}
+
+unsafe fn focus_window_reliable(target_hwnd: HWND) {
+    if target_hwnd == 0 {
+        return;
+    }
+    let fg_hwnd = GetForegroundWindow();
+    let fg_thread = if fg_hwnd != 0 {
+        GetWindowThreadProcessId(fg_hwnd, std::ptr::null_mut())
+    } else {
+        0
+    };
+    let cur_thread = GetCurrentThreadId();
+    if fg_thread != 0 && fg_thread != cur_thread {
+        AttachThreadInput(cur_thread, fg_thread, 1);
+    }
+    // Only call SW_RESTORE if the window is minimized (iconic), never un-maximize a maximized window!
+    if IsIconic(target_hwnd) != 0 {
+        ShowWindow(target_hwnd, SW_RESTORE);
+    }
+    BringWindowToTop(target_hwnd);
+    SetForegroundWindow(target_hwnd);
+    if fg_thread != 0 && fg_thread != cur_thread {
+        AttachThreadInput(cur_thread, fg_thread, 0);
     }
 }
 
@@ -121,6 +161,10 @@ pub struct RemotePromptCommand {
     pub action_mode: Option<RemoteActionMode>,
     pub project_path: Option<String>,
     pub command: Option<String>,
+    #[serde(default)]
+    pub project_name: Option<String>,
+    #[serde(default)]
+    pub conversation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -159,6 +203,10 @@ pub struct RemoteActionResult {
     pub message: String,
     pub target_window: Option<String>,
     pub stdout: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stderr: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
 }
 
 pub struct RemoteActionDispatcher;
@@ -173,6 +221,41 @@ impl RemoteActionDispatcher {
 
         info!("RemoteAction: Processing mode {:?} for IDE {:?}", mode, ide);
 
+        // Resolve project metadata if conversation_id or project_name or project_path was provided
+        let resolved_proj = cmd
+            .conversation_id
+            .as_deref()
+            .and_then(|cid| state.resolve_project_by_id(cid))
+            .or_else(|| {
+                cmd.project_name
+                    .as_deref()
+                    .and_then(|pname| state.resolve_project_by_id(pname))
+            });
+
+        let effective_project_name = cmd
+            .project_name
+            .clone()
+            .or_else(|| resolved_proj.as_ref().map(|p| p.project_name.clone()))
+            .or_else(|| {
+                cmd.project_path.as_deref().and_then(|p| {
+                    Path::new(p)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())
+                })
+            });
+
+        let effective_project_path = cmd
+            .project_path
+            .clone()
+            .or_else(|| resolved_proj.as_ref().and_then(|p| p.project_path.clone()))
+            .or_else(|| {
+                effective_project_name
+                    .as_deref()
+                    .map(|name| format!("C:\\{}", name))
+            });
+
         // 1. Record in chat stream so phone immediately sees message in chat
         let step = ChatStep {
             id: uuid::Uuid::new_v4().to_string(),
@@ -185,17 +268,30 @@ impl RemoteActionDispatcher {
             thinking: None,
             tool_calls: None,
             ide: ide.clone(),
-            project_name: None,
-            conversation_id: None,
-            conversation_title: None,
+            project_name: effective_project_name.clone(),
+            conversation_id: cmd.conversation_id.clone(),
+            conversation_title: resolved_proj.as_ref().map(|p| p.conversation_title.clone()),
             input_tokens: None,
             output_tokens: None,
             cache_read_tokens: None,
         };
         state.add_chat_step(step);
 
-        // 2. Always persist to inbox for Antigravity & IDE daemons / MCP
-        Self::save_to_inbox(&cmd.message, &ide);
+        // 2. Persist to inbox for DirectInbox and InjectWindow modes
+        if matches!(mode, RemoteActionMode::DirectInbox | RemoteActionMode::InjectWindow) {
+            Self::save_to_inbox(
+                &cmd.message,
+                &ide,
+                effective_project_name.as_deref(),
+                cmd.conversation_id.as_deref(),
+            );
+            state.push_inbox_message(
+                cmd.message.clone(),
+                ide.to_string(),
+                effective_project_name.clone(),
+                cmd.conversation_id.clone(),
+            );
+        }
 
         // 3. Handle action mode
         match mode {
@@ -206,10 +302,17 @@ impl RemoteActionDispatcher {
                     message: "Prompt queued in inbox successfully".to_string(),
                     target_window: None,
                     stdout: None,
+                    stderr: None,
+                    exit_code: None,
                 }
             }
             RemoteActionMode::InjectWindow => {
-                let inject_res = Self::inject_prompt_into_ide_window(&cmd.message, &ide).await;
+                let inject_res = Self::inject_prompt_into_ide_window(
+                    &cmd.message,
+                    &ide,
+                    effective_project_name.as_deref(),
+                )
+                .await;
                 match inject_res {
                     Ok(win_title) => {
                         state.send_alert(
@@ -222,6 +325,8 @@ impl RemoteActionDispatcher {
                             message: format!("Successfully pasted and triggered prompt in '{win_title}'"),
                             target_window: Some(win_title),
                             stdout: None,
+                            stderr: None,
+                            exit_code: None,
                         }
                     }
                     Err(err) => {
@@ -232,18 +337,29 @@ impl RemoteActionDispatcher {
                             message: format!("Saved to inbox (Window inject notice: {err})"),
                             target_window: None,
                             stdout: None,
+                            stderr: None,
+                            exit_code: None,
                         }
                     }
                 }
             }
             RemoteActionMode::LaunchProject => {
-                let target_path = cmd.project_path.unwrap_or_else(|| "C:\\".to_string());
+                let target_path = effective_project_path.unwrap_or_else(|| "C:\\PulseBridge".to_string());
                 let launch_res = Self::launch_ide_project(&ide, &target_path);
+                let ok = launch_res.is_ok();
+                let msg = launch_res.unwrap_or_else(|e| e);
+                if ok {
+                    state.send_alert("success", "Project Opened", &msg);
+                } else {
+                    state.send_alert("error", "Project Launch Failed", &msg);
+                }
                 RemoteActionResult {
-                    success: launch_res.is_ok(),
-                    message: launch_res.unwrap_or_else(|e| e),
+                    success: ok,
+                    message: msg,
                     target_window: None,
                     stdout: None,
+                    stderr: None,
+                    exit_code: None,
                 }
             }
             RemoteActionMode::ExecuteCommand => {
@@ -259,6 +375,8 @@ impl RemoteActionDispatcher {
                         message: "Security Policy: Remote shell execution is disabled by default. Launch server with --enable-shell-commands to opt in.".to_string(),
                         target_window: None,
                         stdout: None,
+                        stderr: None,
+                        exit_code: None,
                     };
                 }
 
@@ -270,21 +388,43 @@ impl RemoteActionDispatcher {
                         message: format!("Security Violation: Command '{shell_cmd}' is not in the approved DevOps allowlist (git, cargo, npm, pnpm, yarn, pytest)."),
                         target_window: None,
                         stdout: None,
+                        stderr: None,
+                        exit_code: None,
                     };
                 }
 
-                let exec_res = Self::execute_quick_shell_command(&shell_cmd).await;
+                let (ok, combined_out, stderr_opt, code_opt, used_dir) =
+                    Self::execute_quick_shell_command(&shell_cmd, effective_project_path.as_deref()).await;
+
+                let msg = if ok {
+                    format!("Command '{}' succeeded in {}", shell_cmd, used_dir)
+                } else {
+                    format!(
+                        "Command '{}' exited with code {} in {}",
+                        shell_cmd,
+                        code_opt.unwrap_or(-1),
+                        used_dir
+                    )
+                };
+
                 RemoteActionResult {
-                    success: exec_res.0,
-                    message: "Command execution finished".to_string(),
-                    target_window: None,
-                    stdout: Some(exec_res.1),
+                    success: ok,
+                    message: msg,
+                    target_window: Some(used_dir),
+                    stdout: Some(combined_out),
+                    stderr: stderr_opt,
+                    exit_code: code_opt,
                 }
             }
         }
     }
 
-    fn save_to_inbox(message: &str, ide: &IdeSource) {
+    fn save_to_inbox(
+        message: &str,
+        ide: &IdeSource,
+        project_name: Option<&str>,
+        conversation_id: Option<&str>,
+    ) {
         let user_profile = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\Users\\Default".to_string());
         let brain_inbox = Path::new(&user_profile)
             .join(".gemini")
@@ -293,12 +433,14 @@ impl RemoteActionDispatcher {
             .join("forge-inbox");
 
         let _ = fs::create_dir_all(&brain_inbox);
-        let filename = format!("{}_mobile_prompt.json", Local::now().format("%Y%m%d_%H%M%S"));
+        let filename = format!("{}_mobile_prompt.json", Local::now().format("%Y%m%d_%H%M%S_%3f"));
         let target = brain_inbox.join(filename);
 
         let data = json!({
             "source": "pulsebridge_phone",
             "ide": ide.to_string(),
+            "project_name": project_name,
+            "conversation_id": conversation_id,
             "timestamp": Local::now().to_rfc3339(),
             "prompt": message
         });
@@ -314,17 +456,45 @@ impl RemoteActionDispatcher {
     async fn inject_prompt_into_ide_window(
         message: &str,
         target_ide: &IdeSource,
+        project_hint: Option<&str>,
     ) -> Result<String, String> {
         let windows = ScreenCapturer::list_ide_windows();
-        let target_window = windows.iter().find(|w| {
-            match target_ide {
-                IdeSource::Cursor => w.ide == IdeSource::Cursor,
-                IdeSource::Antigravity => w.ide == IdeSource::Antigravity,
-                IdeSource::VSCode => w.ide == IdeSource::VSCode || w.ide == IdeSource::VisualStudio,
-                IdeSource::VisualStudio => w.ide == IdeSource::VisualStudio || w.ide == IdeSource::VSCode,
-                IdeSource::Custom => true,
-            }
-        });
+        let hint_lower = project_hint.map(|s| s.to_lowercase());
+
+        // 1. Prefer an open window matching both the target IDE and the project name in its title
+        let target_window = windows
+            .iter()
+            .find(|w| {
+                let ide_matches = match target_ide {
+                    IdeSource::Cursor => w.ide == IdeSource::Cursor,
+                    IdeSource::Antigravity => w.ide == IdeSource::Antigravity,
+                    IdeSource::VSCode => w.ide == IdeSource::VSCode || w.ide == IdeSource::VisualStudio,
+                    IdeSource::VisualStudio => w.ide == IdeSource::VisualStudio || w.ide == IdeSource::VSCode,
+                    IdeSource::Custom => true,
+                };
+                if !ide_matches {
+                    return false;
+                }
+                if let Some(ref h) = hint_lower {
+                    w.title.to_lowercase().contains(h)
+                } else {
+                    true
+                }
+            })
+            .or_else(|| {
+                // 2. Fall back to any window matching the target IDE
+                windows.iter().find(|w| match target_ide {
+                    IdeSource::Cursor => w.ide == IdeSource::Cursor,
+                    IdeSource::Antigravity => w.ide == IdeSource::Antigravity,
+                    IdeSource::VSCode => w.ide == IdeSource::VSCode || w.ide == IdeSource::VisualStudio,
+                    IdeSource::VisualStudio => w.ide == IdeSource::VisualStudio || w.ide == IdeSource::VSCode,
+                    IdeSource::Custom => true,
+                })
+            })
+            .or_else(|| {
+                // 3. Fall back to any known IDE window (not arbitrary desktop windows)
+                windows.iter().find(|w| w.ide != IdeSource::Custom)
+            });
 
         let win = match target_window {
             Some(w) => w,
@@ -349,7 +519,7 @@ impl RemoteActionDispatcher {
             }
         }
 
-        // 2. Perform focus, click, and keystroke injection in a dedicated station-attached OS thread
+        // 2. Perform focus and keystroke injection in a dedicated station-attached OS thread
         let handle = std::thread::spawn(move || {
             unsafe {
                 let winsta = OpenWindowStationA(b"WinSta0\0".as_ptr(), 0, 0x037F);
@@ -362,55 +532,21 @@ impl RemoteActionDispatcher {
                 }
                 let _ = SetProcessDPIAware();
 
-                let foreground_hwnd = GetForegroundWindow();
-                let foreground_thread = if foreground_hwnd != 0 {
-                    GetWindowThreadProcessId(foreground_hwnd, std::ptr::null_mut())
-                } else {
-                    0
-                };
-                let current_thread = GetCurrentThreadId();
+                focus_window_reliable(hwnd);
+                std::thread::sleep(Duration::from_millis(180));
 
-                if foreground_thread != 0 && foreground_thread != current_thread {
-                    AttachThreadInput(current_thread, foreground_thread, 1);
-                }
-
-                ShowWindow(hwnd, SW_RESTORE);
-                BringWindowToTop(hwnd);
-                SetForegroundWindow(hwnd);
-
-                if foreground_thread != 0 && foreground_thread != current_thread {
-                    AttachThreadInput(current_thread, foreground_thread, 0);
-                }
-
-                std::thread::sleep(Duration::from_millis(200));
-
-                let mut rect: RECT = std::mem::zeroed();
-                GetWindowRect(hwnd, &mut rect);
-
-                if ide_type == IdeSource::Antigravity {
-                    // Focus Antigravity composer via Ctrl+L and click into prompt textarea
+                if ide_type == IdeSource::Antigravity
+                    || ide_type == IdeSource::Cursor
+                    || ide_type == IdeSource::VSCode
+                {
+                    // Focus composer via Ctrl+L without blind clicking (which can defocus on different panel sizes)
                     Self::simulate_combo(&[VK_CONTROL, 0x4C]);
-                    std::thread::sleep(Duration::from_millis(120));
-                    let win_w = rect.right - rect.left;
-                    let click_x = if win_w > 950 {
-                        rect.right - 260
-                    } else {
-                        rect.left + (win_w / 2)
-                    };
-                    let click_y = rect.bottom - 80;
-                    SetCursorPos(click_x, click_y);
-                    mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-                    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                    std::thread::sleep(Duration::from_millis(150));
-                } else if ide_type == IdeSource::Cursor || ide_type == IdeSource::VSCode {
-                    // Ctrl + L focuses Cursor/VSCode chat composer
-                    Self::simulate_combo(&[VK_CONTROL, 0x4C]);
-                    std::thread::sleep(Duration::from_millis(150));
+                    std::thread::sleep(Duration::from_millis(160));
                 }
 
                 // Simulate Ctrl + V
                 Self::simulate_ctrl_v();
-                std::thread::sleep(Duration::from_millis(150));
+                std::thread::sleep(Duration::from_millis(140));
 
                 // Simulate Enter
                 Self::simulate_enter();
@@ -461,8 +597,24 @@ impl RemoteActionDispatcher {
         );
     }
 
+    fn is_extended_key(vk: u16) -> bool {
+        matches!(
+            vk,
+            0x21..=0x28 // PGUP, PGDN, END, HOME, LEFT, UP, RIGHT, DOWN
+            | 0x2C..=0x2E // SNAPSHOT, INSERT, DELETE
+            | 0x5B..=0x5D // LWIN, RWIN, APPS
+            | 0x6F // VK_DIVIDE
+            | 0x90 // VK_NUMLOCK
+            | 0xA3 | 0xA5 // VK_RCONTROL, VK_RMENU
+        )
+    }
+
     fn create_key_input(vk: u16, key_up: bool) -> INPUT {
-        let flags = if key_up { KEYEVENTF_KEYUP } else { 0 };
+        const KEYEVENTF_EXTENDEDKEY: u32 = 0x0001;
+        let mut flags = if key_up { KEYEVENTF_KEYUP } else { 0 };
+        if Self::is_extended_key(vk) {
+            flags |= KEYEVENTF_EXTENDEDKEY;
+        }
         let scan = unsafe { MapVirtualKeyW(vk as u32, 0) as u16 };
         INPUT {
             r#type: INPUT_KEYBOARD,
@@ -479,14 +631,74 @@ impl RemoteActionDispatcher {
     }
 
     fn launch_ide_project(ide: &IdeSource, path: &str) -> Result<String, String> {
-        let cmd_name = match ide {
-            IdeSource::Cursor => "cursor",
-            IdeSource::VSCode | IdeSource::VisualStudio => "code",
-            _ => "code",
+        let proj_folder_name = Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(path)
+            .to_lowercase();
+
+        // 1. Check if an IDE window with this project folder name is already open; if so, focus it immediately
+        let windows = ScreenCapturer::list_ide_windows();
+        if let Some(existing_win) = windows.iter().find(|w| {
+            let ide_ok = match ide {
+                IdeSource::Antigravity => w.ide == IdeSource::Antigravity,
+                IdeSource::Cursor => w.ide == IdeSource::Cursor,
+                IdeSource::VSCode => w.ide == IdeSource::VSCode,
+                IdeSource::VisualStudio => w.ide == IdeSource::VisualStudio,
+                IdeSource::Custom => true,
+            };
+            ide_ok && !proj_folder_name.is_empty() && w.title.to_lowercase().contains(&proj_folder_name)
+        }) {
+            let hwnd = existing_win.hwnd as HWND;
+            let title = existing_win.title.clone();
+            let _ = std::thread::spawn(move || unsafe {
+                let _ = SetProcessDPIAware();
+                focus_window_reliable(hwnd);
+            })
+            .join();
+            return Ok(format!("Focused active {ide} window: '{title}'"));
+        }
+
+        // 2. Otherwise spawn the target IDE binary safely with path as direct argument (no shell injection)
+        let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        let candidates: Vec<String> = match ide {
+            IdeSource::Antigravity => vec![
+                format!("{}\\Programs\\Antigravity\\Antigravity.exe", local_app_data),
+                "antigravity.cmd".to_string(),
+                "agy.cmd".to_string(),
+                "code.cmd".to_string(),
+            ],
+            IdeSource::Cursor => vec![
+                format!("{}\\Programs\\cursor\\Cursor.exe", local_app_data),
+                "cursor.cmd".to_string(),
+                "cursor".to_string(),
+            ],
+            IdeSource::VisualStudio => vec![
+                "devenv.exe".to_string(),
+                "code.cmd".to_string(),
+            ],
+            IdeSource::VSCode | IdeSource::Custom => vec![
+                format!("{}\\Programs\\Microsoft VS Code\\Code.exe", local_app_data),
+                "code.cmd".to_string(),
+                "code".to_string(),
+            ],
         };
 
-        Command::new("powershell")
-            .args(["-NoProfile", "-Command", &format!("& {} '{}'", cmd_name, path)])
+        for bin in &candidates {
+            if Command::new(bin).arg(path).spawn().is_ok() {
+                return Ok(format!("Opened project '{path}' in {ide}"));
+            }
+        }
+
+        // Fallback via cmd /c start if CLI shims are in user PATH
+        let cmd_name = match ide {
+            IdeSource::Antigravity => "antigravity",
+            IdeSource::Cursor => "cursor",
+            IdeSource::VisualStudio => "devenv",
+            IdeSource::VSCode | IdeSource::Custom => "code",
+        };
+        Command::new("cmd")
+            .args(["/C", cmd_name, path])
             .spawn()
             .map_err(|e| format!("Failed to spawn {cmd_name}: {e}"))?;
 
@@ -509,10 +721,8 @@ impl RemoteActionDispatcher {
                 let (screen_x, screen_y) = if let Some(hwnd) = cmd.window_id {
                     if hwnd > 0 {
                         let target_hwnd = hwnd as HWND;
-                        // Bring target window to foreground so clicks are delivered directly to it
-                        ShowWindow(target_hwnd, SW_RESTORE);
-                        SetForegroundWindow(target_hwnd);
-                        BringWindowToTop(target_hwnd);
+                        // Bring target window to foreground without un-maximizing maximized windows
+                        focus_window_reliable(target_hwnd);
                         std::thread::sleep(Duration::from_millis(40));
 
                         let mut rect: RECT = std::mem::zeroed();
@@ -526,15 +736,15 @@ impl RemoteActionDispatcher {
                             return Err("Failed to get window rect".to_string());
                         }
                     } else {
-                        let w = windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CXSCREEN) as f32;
-                        let h = windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CYSCREEN) as f32;
+                        let w = windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CXSCREEN).max(800) as f32;
+                        let h = windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CYSCREEN).max(600) as f32;
                         let x = (w * cmd.x_ratio.clamp(0.0, 1.0)).round() as i32;
                         let y = (h * cmd.y_ratio.clamp(0.0, 1.0)).round() as i32;
                         (x, y)
                     }
                 } else {
-                    let w = windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CXSCREEN) as f32;
-                    let h = windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CYSCREEN) as f32;
+                    let w = windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CXSCREEN).max(800) as f32;
+                    let h = windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CYSCREEN).max(600) as f32;
                     let x = (w * cmd.x_ratio.clamp(0.0, 1.0)).round() as i32;
                     let y = (h * cmd.y_ratio.clamp(0.0, 1.0)).round() as i32;
                     (x, y)
@@ -594,16 +804,20 @@ impl RemoteActionDispatcher {
                 if let Some(hwnd) = cmd.window_id {
                     if hwnd > 0 {
                         let target_hwnd = hwnd as HWND;
-                        ShowWindow(target_hwnd, SW_RESTORE);
-                        SetForegroundWindow(target_hwnd);
-                        BringWindowToTop(target_hwnd);
+                        focus_window_reliable(target_hwnd);
                         std::thread::sleep(Duration::from_millis(30));
                     }
                 }
 
-                // If coordinates were specified, reposition cursor first
-                if let (Some(xr), Some(yr)) = (cmd.x_ratio, cmd.y_ratio) {
-                    let (screen_x, screen_y) = if let Some(hwnd) = cmd.window_id {
+                // Reposition cursor over target region (supports negative multi-monitor coordinates)
+                let ratios = match (cmd.x_ratio, cmd.y_ratio) {
+                    (Some(xr), Some(yr)) => Some((xr, yr)),
+                    _ if cmd.window_id.filter(|&h| h > 0).is_some() => Some((0.5, 0.5)),
+                    _ => None,
+                };
+
+                if let Some((xr, yr)) = ratios {
+                    let target_pos: Option<(i32, i32)> = if let Some(hwnd) = cmd.window_id {
                         if hwnd > 0 {
                             let mut rect: RECT = std::mem::zeroed();
                             if GetWindowRect(hwnd as HWND, &mut rect) != 0 {
@@ -611,22 +825,22 @@ impl RemoteActionDispatcher {
                                 let h = (rect.bottom - rect.top) as f32;
                                 let x = rect.left + (w * xr.clamp(0.0, 1.0)).round() as i32;
                                 let y = rect.top + (h * yr.clamp(0.0, 1.0)).round() as i32;
-                                (x, y)
+                                Some((x, y))
                             } else {
-                                (0, 0)
+                                None
                             }
                         } else {
-                            let w = windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CXSCREEN) as f32;
-                            let h = windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CYSCREEN) as f32;
-                            ((w * xr.clamp(0.0, 1.0)).round() as i32, (h * yr.clamp(0.0, 1.0)).round() as i32)
+                            let w = windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CXSCREEN).max(800) as f32;
+                            let h = windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CYSCREEN).max(600) as f32;
+                            Some(((w * xr.clamp(0.0, 1.0)).round() as i32, (h * yr.clamp(0.0, 1.0)).round() as i32))
                         }
                     } else {
-                        let w = windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CXSCREEN) as f32;
-                        let h = windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CYSCREEN) as f32;
-                        ((w * xr.clamp(0.0, 1.0)).round() as i32, (h * yr.clamp(0.0, 1.0)).round() as i32)
+                        let w = windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CXSCREEN).max(800) as f32;
+                        let h = windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows_sys::Win32::UI::WindowsAndMessaging::SM_CYSCREEN).max(600) as f32;
+                        Some(((w * xr.clamp(0.0, 1.0)).round() as i32, (h * yr.clamp(0.0, 1.0)).round() as i32))
                     };
 
-                    if screen_x > 0 || screen_y > 0 {
+                    if let Some((screen_x, screen_y)) = target_pos {
                         SetCursorPos(screen_x, screen_y);
                         std::thread::sleep(Duration::from_millis(20));
                     }
@@ -671,23 +885,8 @@ impl RemoteActionDispatcher {
 
                 if let Some(hwnd) = target_hwnd_opt {
                     let target_hwnd = hwnd as HWND;
-                    let fg_hwnd = GetForegroundWindow();
-                    if fg_hwnd != target_hwnd {
-                        let fg_thread = if fg_hwnd != 0 {
-                            GetWindowThreadProcessId(fg_hwnd, std::ptr::null_mut())
-                        } else {
-                            0
-                        };
-                        let cur_thread = GetCurrentThreadId();
-                        if fg_thread != 0 && fg_thread != cur_thread {
-                            AttachThreadInput(cur_thread, fg_thread, 1);
-                        }
-                        ShowWindow(target_hwnd, SW_RESTORE);
-                        BringWindowToTop(target_hwnd);
-                        SetForegroundWindow(target_hwnd);
-                        if fg_thread != 0 && fg_thread != cur_thread {
-                            AttachThreadInput(cur_thread, fg_thread, 0);
-                        }
+                    if GetForegroundWindow() != target_hwnd {
+                        focus_window_reliable(target_hwnd);
                         std::thread::sleep(Duration::from_millis(60));
                     }
                 }
@@ -713,7 +912,11 @@ impl RemoteActionDispatcher {
 
     pub fn trigger_emergency_stop() -> Result<String, String> {
         let windows = ScreenCapturer::list_ide_windows();
-        let target_win = windows.first().cloned();
+        let target_win = windows
+            .iter()
+            .find(|w| w.ide != IdeSource::Custom)
+            .or_else(|| windows.first())
+            .cloned();
 
         let handle = std::thread::spawn(move || {
             unsafe {
@@ -731,9 +934,7 @@ impl RemoteActionDispatcher {
                 if let Some(win) = target_win {
                     win_label = win.title.clone();
                     let target_hwnd = win.hwnd as HWND;
-                    ShowWindow(target_hwnd, SW_RESTORE);
-                    BringWindowToTop(target_hwnd);
-                    SetForegroundWindow(target_hwnd);
+                    focus_window_reliable(target_hwnd);
                     std::thread::sleep(Duration::from_millis(50));
                 }
 
@@ -757,9 +958,13 @@ impl RemoteActionDispatcher {
     }
 
     pub fn simulate_hotkey(hotkey: &str, window_id: Option<isize>) -> Result<(), String> {
-        let key_str = hotkey.to_string();
+        let key_str = hotkey.trim().to_string();
         let target_hwnd_opt = window_id.filter(|&h| h > 0).or_else(|| {
-            ScreenCapturer::list_ide_windows().first().map(|w| w.hwnd)
+            let wins = ScreenCapturer::list_ide_windows();
+            wins.iter()
+                .find(|w| w.ide != IdeSource::Custom)
+                .or_else(|| wins.first())
+                .map(|w| w.hwnd)
         });
 
         let handle = std::thread::spawn(move || {
@@ -776,28 +981,17 @@ impl RemoteActionDispatcher {
 
                 if let Some(hwnd) = target_hwnd_opt {
                     let target_hwnd = hwnd as HWND;
-                    let fg_hwnd = GetForegroundWindow();
-                    if fg_hwnd != target_hwnd {
-                        let fg_thread = if fg_hwnd != 0 {
-                            GetWindowThreadProcessId(fg_hwnd, std::ptr::null_mut())
-                        } else {
-                            0
-                        };
-                        let cur_thread = GetCurrentThreadId();
-                        if fg_thread != 0 && fg_thread != cur_thread {
-                            AttachThreadInput(cur_thread, fg_thread, 1);
-                        }
-                        ShowWindow(target_hwnd, SW_RESTORE);
-                        BringWindowToTop(target_hwnd);
-                        SetForegroundWindow(target_hwnd);
-                        if fg_thread != 0 && fg_thread != cur_thread {
-                            AttachThreadInput(cur_thread, fg_thread, 0);
-                        }
+                    if GetForegroundWindow() != target_hwnd {
+                        focus_window_reliable(target_hwnd);
                         std::thread::sleep(Duration::from_millis(40));
                     }
                 }
 
-                let res = match key_str.to_lowercase().as_str() {
+                let normalized = key_str.to_lowercase().replace('+', "_").replace('-', "_");
+                const VK_SHIFT: u16 = 0x10;
+                const VK_MENU: u16 = 0x12; // Alt
+
+                let res = match normalized.as_str() {
                     "ctrl_l" => {
                         Self::simulate_combo(&[VK_CONTROL, 0x4C]);
                         Ok(())
@@ -818,11 +1012,15 @@ impl RemoteActionDispatcher {
                         Self::simulate_combo(&[VK_CONTROL, 0x56]);
                         Ok(())
                     }
+                    "ctrl_x" => {
+                        Self::simulate_combo(&[VK_CONTROL, 0x58]);
+                        Ok(())
+                    }
                     "ctrl_z" => {
                         Self::simulate_combo(&[VK_CONTROL, 0x5A]);
                         Ok(())
                     }
-                    "ctrl_y" => {
+                    "ctrl_y" | "ctrl_shift_z" => {
                         Self::simulate_combo(&[VK_CONTROL, 0x59]);
                         Ok(())
                     }
@@ -834,12 +1032,96 @@ impl RemoteActionDispatcher {
                         Self::simulate_combo(&[VK_CONTROL, 0x50]);
                         Ok(())
                     }
+                    "ctrl_b" => {
+                        Self::simulate_combo(&[VK_CONTROL, 0x42]);
+                        Ok(())
+                    }
+                    "ctrl_j" => {
+                        Self::simulate_combo(&[VK_CONTROL, 0x4A]);
+                        Ok(())
+                    }
+                    "ctrl_f" => {
+                        Self::simulate_combo(&[VK_CONTROL, 0x46]);
+                        Ok(())
+                    }
+                    "ctrl_h" => {
+                        Self::simulate_combo(&[VK_CONTROL, 0x48]);
+                        Ok(())
+                    }
+                    "ctrl_w" => {
+                        Self::simulate_combo(&[VK_CONTROL, 0x57]);
+                        Ok(())
+                    }
+                    "ctrl_n" => {
+                        Self::simulate_combo(&[VK_CONTROL, 0x4E]);
+                        Ok(())
+                    }
+                    "ctrl_d" => {
+                        Self::simulate_combo(&[VK_CONTROL, 0x44]);
+                        Ok(())
+                    }
                     "ctrl_shift_p" | "f1" => {
-                        Self::simulate_combo(&[VK_CONTROL, 0x10 /* VK_SHIFT */, 0x50]);
+                        Self::simulate_combo(&[VK_CONTROL, VK_SHIFT, 0x50]);
+                        Ok(())
+                    }
+                    "ctrl_shift_f" => {
+                        Self::simulate_combo(&[VK_CONTROL, VK_SHIFT, 0x46]);
+                        Ok(())
+                    }
+                    "ctrl_shift_e" => {
+                        Self::simulate_combo(&[VK_CONTROL, VK_SHIFT, 0x45]);
+                        Ok(())
+                    }
+                    "ctrl_shift_g" => {
+                        Self::simulate_combo(&[VK_CONTROL, VK_SHIFT, 0x47]);
+                        Ok(())
+                    }
+                    "ctrl_shift_x" => {
+                        Self::simulate_combo(&[VK_CONTROL, VK_SHIFT, 0x58]);
+                        Ok(())
+                    }
+                    "ctrl_shift_k" => {
+                        Self::simulate_combo(&[VK_CONTROL, VK_SHIFT, 0x4B]);
+                        Ok(())
+                    }
+                    "ctrl_shift_tilde" | "ctrl_shift_`" => {
+                        Self::simulate_combo(&[VK_CONTROL, VK_SHIFT, 0xC0]);
                         Ok(())
                     }
                     "ctrl_enter" => {
                         Self::simulate_combo(&[VK_CONTROL, VK_RETURN]);
+                        Ok(())
+                    }
+                    "shift_enter" => {
+                        Self::simulate_combo(&[VK_SHIFT, VK_RETURN]);
+                        Ok(())
+                    }
+                    "shift_tab" => {
+                        Self::simulate_combo(&[VK_SHIFT, 0x09]);
+                        Ok(())
+                    }
+                    "alt_tab" => {
+                        Self::simulate_combo(&[VK_MENU, 0x09]);
+                        Ok(())
+                    }
+                    "alt_z" => {
+                        Self::simulate_combo(&[VK_MENU, 0x5A]);
+                        Ok(())
+                    }
+                    "alt_up" => {
+                        Self::simulate_combo(&[VK_MENU, 0x26]);
+                        Ok(())
+                    }
+                    "alt_down" => {
+                        Self::simulate_combo(&[VK_MENU, 0x28]);
+                        Ok(())
+                    }
+                    "ctrl_home" => {
+                        Self::simulate_combo(&[VK_CONTROL, 0x24]);
+                        Ok(())
+                    }
+                    "ctrl_end" => {
+                        Self::simulate_combo(&[VK_CONTROL, 0x23]);
                         Ok(())
                     }
                     "ctrl_slash" | "ctrl_/" => {
@@ -850,11 +1132,11 @@ impl RemoteActionDispatcher {
                         Self::simulate_combo(&[VK_CONTROL, 0xC0]);
                         Ok(())
                     }
-                    "esc" => {
+                    "esc" | "escape" => {
                         Self::simulate_key_press(VK_ESCAPE);
                         Ok(())
                     }
-                    "enter" => {
+                    "enter" | "return" => {
                         Self::simulate_key_press(VK_RETURN);
                         Ok(())
                     }
@@ -862,8 +1144,48 @@ impl RemoteActionDispatcher {
                         Self::simulate_key_press(0x20);
                         Ok(())
                     }
+                    "f2" => {
+                        Self::simulate_key_press(0x71);
+                        Ok(())
+                    }
+                    "f3" => {
+                        Self::simulate_key_press(0x72);
+                        Ok(())
+                    }
+                    "f4" => {
+                        Self::simulate_key_press(0x73);
+                        Ok(())
+                    }
                     "f5" => {
                         Self::simulate_key_press(VK_F5);
+                        Ok(())
+                    }
+                    "f6" => {
+                        Self::simulate_key_press(0x75);
+                        Ok(())
+                    }
+                    "f7" => {
+                        Self::simulate_key_press(0x76);
+                        Ok(())
+                    }
+                    "f8" => {
+                        Self::simulate_key_press(0x77);
+                        Ok(())
+                    }
+                    "f9" => {
+                        Self::simulate_key_press(0x78);
+                        Ok(())
+                    }
+                    "f10" => {
+                        Self::simulate_key_press(0x79);
+                        Ok(())
+                    }
+                    "f11" => {
+                        Self::simulate_key_press(0x7A);
+                        Ok(())
+                    }
+                    "f12" => {
+                        Self::simulate_key_press(0x7B);
                         Ok(())
                     }
                     "tab" => {
@@ -874,23 +1196,27 @@ impl RemoteActionDispatcher {
                         Self::simulate_key_press(0x08);
                         Ok(())
                     }
+                    "insert" => {
+                        Self::simulate_key_press(0x2D);
+                        Ok(())
+                    }
                     "delete" => {
                         Self::simulate_key_press(0x2E);
                         Ok(())
                     }
-                    "up" => {
+                    "up" | "arrow_up" => {
                         Self::simulate_key_press(0x26);
                         Ok(())
                     }
-                    "down" => {
+                    "down" | "arrow_down" => {
                         Self::simulate_key_press(0x28);
                         Ok(())
                     }
-                    "left" => {
+                    "left" | "arrow_left" => {
                         Self::simulate_key_press(0x25);
                         Ok(())
                     }
-                    "right" => {
+                    "right" | "arrow_right" => {
                         Self::simulate_key_press(0x27);
                         Ok(())
                     }
@@ -951,9 +1277,61 @@ impl RemoteActionDispatcher {
         );
     }
 
-    async fn execute_quick_shell_command(cmd: &str) -> (bool, String) {
+    async fn execute_quick_shell_command(
+        cmd: &str,
+        cwd_hint: Option<&str>,
+    ) -> (bool, String, Option<String>, Option<i32>, String) {
+        let trimmed = cmd.trim();
+        let mut work_dir = cwd_hint
+            .map(Path::new)
+            .filter(|p| p.exists() && p.is_dir())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| {
+                let pb = Path::new("C:\\PulseBridge");
+                if pb.exists() {
+                    pb.to_path_buf()
+                } else {
+                    std::env::current_dir().unwrap_or_else(|_| Path::new("C:\\").to_path_buf())
+                }
+            });
+
+        // Smart sub-workspace resolution for monorepos (e.g., C:\PulseBridge -> pulsebridge-server / pulsebridge-web)
+        if trimmed.starts_with("cargo ") && !work_dir.join("Cargo.toml").exists() {
+            let sub_server = work_dir.join("pulsebridge-server");
+            if sub_server.join("Cargo.toml").exists() {
+                work_dir = sub_server;
+            } else if let Ok(entries) = fs::read_dir(&work_dir) {
+                for entry in entries.flatten() {
+                    if entry.path().is_dir() && entry.path().join("Cargo.toml").exists() {
+                        work_dir = entry.path();
+                        break;
+                    }
+                }
+            }
+        } else if (trimmed.starts_with("npm ") || trimmed.starts_with("pnpm ") || trimmed.starts_with("yarn "))
+            && !work_dir.join("package.json").exists()
+        {
+            let sub_web = work_dir.join("pulsebridge-web");
+            let sub_fe = work_dir.join("frontend");
+            if sub_web.join("package.json").exists() {
+                work_dir = sub_web;
+            } else if sub_fe.join("package.json").exists() {
+                work_dir = sub_fe;
+            } else if let Ok(entries) = fs::read_dir(&work_dir) {
+                for entry in entries.flatten() {
+                    if entry.path().is_dir() && entry.path().join("package.json").exists() {
+                        work_dir = entry.path();
+                        break;
+                    }
+                }
+            }
+        }
+
+        let used_dir_str = work_dir.to_string_lossy().to_string();
+
         let output = tokio::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", cmd])
+            .current_dir(&work_dir)
+            .args(["-NoProfile", "-Command", trimmed])
             .output()
             .await;
 
@@ -961,20 +1339,39 @@ impl RemoteActionDispatcher {
             Ok(out) => {
                 let stdout = String::from_utf8_lossy(&out.stdout).to_string();
                 let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                let full = if stderr.is_empty() {
-                    stdout
+                let full = if stderr.trim().is_empty() {
+                    stdout.clone()
+                } else if stdout.trim().is_empty() {
+                    stderr.clone()
                 } else {
                     format!("{stdout}\nSTDERR:\n{stderr}")
                 };
-                (out.status.success(), full)
+                let stderr_opt = if stderr.trim().is_empty() {
+                    None
+                } else {
+                    Some(stderr)
+                };
+                (
+                    out.status.success(),
+                    full,
+                    stderr_opt,
+                    out.status.code(),
+                    used_dir_str,
+                )
             }
-            Err(e) => (false, format!("Execution failed: {e}")),
+            Err(e) => (
+                false,
+                format!("Execution failed: {e}"),
+                Some(e.to_string()),
+                Some(-1),
+                used_dir_str,
+            ),
         }
     }
 
     pub fn is_command_allowlisted(cmd: &str) -> bool {
         let trimmed = cmd.trim();
-        // Reject shell command chaining, pipes, redirects, backticks, subshells
+        // Reject shell command chaining, pipes, redirects, backticks, subshells, and multiline injections
         if trimmed.contains('&')
             || trimmed.contains(';')
             || trimmed.contains('|')
@@ -982,6 +1379,8 @@ impl RemoteActionDispatcher {
             || trimmed.contains('$')
             || trimmed.contains('>')
             || trimmed.contains('<')
+            || trimmed.contains('\n')
+            || trimmed.contains('\r')
         {
             return false;
         }
@@ -991,18 +1390,33 @@ impl RemoteActionDispatcher {
             "git diff",
             "git log",
             "git branch",
+            "git pull",
+            "git fetch",
+            "git show",
             "cargo check",
             "cargo test",
             "cargo build",
+            "cargo clippy",
+            "cargo --version",
+            "rustc --version",
             "npm test",
             "npm run",
+            "npm --version",
+            "node --version",
             "pnpm test",
+            "pnpm run",
             "yarn test",
+            "yarn run",
             "pytest",
             "python -m pytest",
+            "python --version",
         ];
 
-        APPROVED_PREFIXES.iter().any(|prefix| trimmed.starts_with(prefix))
+        APPROVED_PREFIXES.iter().any(|prefix| {
+            trimmed == *prefix
+                || (trimmed.starts_with(prefix)
+                    && trimmed.as_bytes().get(prefix.len()) == Some(&b' '))
+        })
     }
 }
 

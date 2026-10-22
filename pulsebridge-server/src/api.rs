@@ -127,28 +127,86 @@ pub async fn chat_steps_handler(
     let cutoff_millis = chrono::Utc::now().timestamp_millis() - (days as i64 * 24 * 3600 * 1000);
 
     if let Some(ref cid) = query.conversation_id {
-        let mem = state.get_recent_steps_filtered(query.project.as_deref(), Some(cid));
-        if !mem.is_empty() {
-            let filtered: Vec<ChatStep> = mem.into_iter().filter(|s| {
-                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&s.timestamp) {
-                    dt.timestamp_millis() >= cutoff_millis
-                } else {
-                    true
+        if !cid.trim().is_empty() && !cid.eq_ignore_ascii_case("ALL") {
+            let is_workspace_id = cid.starts_with("project-")
+                || cid.starts_with("cursor-")
+                || cid.starts_with("vscode-")
+                || cid.eq_ignore_ascii_case("pulsebridge");
+
+            if is_workspace_id {
+                let resolved_proj_name = state
+                    .resolve_project_by_id(cid)
+                    .map(|p| p.project_name)
+                    .unwrap_or_else(|| {
+                        cid.strip_prefix("project-")
+                            .or_else(|| cid.strip_prefix("cursor-"))
+                            .or_else(|| cid.strip_prefix("vscode-"))
+                            .unwrap_or(cid)
+                            .to_string()
+                    });
+
+                let mut steps = state.get_recent_steps_filtered(Some(&resolved_proj_name), None);
+                if steps.is_empty() {
+                    // Find most recent conversation belonging to this project in state.projects
+                    let matching_convs: Vec<String> = state
+                        .get_project_chats_filtered(Some(days))
+                        .into_iter()
+                        .filter(|p| {
+                            p.project_name.eq_ignore_ascii_case(&resolved_proj_name)
+                                && !p.id.starts_with("project-")
+                                && !p.id.starts_with("cursor-")
+                                && !p.id.starts_with("vscode-")
+                        })
+                        .take(3)
+                        .map(|p| p.id)
+                        .collect();
+
+                    for conv_uuid in matching_convs {
+                        let mut disk = load_historical_steps_for_conversation(&conv_uuid, days);
+                        steps.append(&mut disk);
+                    }
                 }
-            }).collect();
+
+                let filtered: Vec<ChatStep> = steps
+                    .into_iter()
+                    .filter(|s| {
+                        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&s.timestamp) {
+                            dt.timestamp_millis() >= cutoff_millis
+                        } else {
+                            true
+                        }
+                    })
+                    .collect();
+                return Ok(Json(filtered));
+            }
+
+            // Specific conversation UUID or ID: merge disk history + in-memory steps
+            let mut combined = load_historical_steps_for_conversation(cid, days);
+            let mem = state.get_recent_steps_filtered(query.project.as_deref(), Some(cid));
+            for m in mem {
+                if !combined.iter().any(|existing| existing.id == m.id) {
+                    combined.push(m);
+                }
+            }
+
+            let filtered: Vec<ChatStep> = combined
+                .into_iter()
+                .filter(|s| {
+                    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&s.timestamp) {
+                        dt.timestamp_millis() >= cutoff_millis
+                    } else {
+                        true
+                    }
+                })
+                .collect();
             return Ok(Json(filtered));
-        }
-        // Load on-demand from disk if not in memory
-        let disk_steps = load_historical_steps_for_conversation(cid, days);
-        if !disk_steps.is_empty() {
-            return Ok(Json(disk_steps));
         }
     }
 
     if query.project.is_some() {
         let list = state.get_recent_steps_filtered(
             query.project.as_deref(),
-            query.conversation_id.as_deref(),
+            None,
         );
         let filtered: Vec<ChatStep> = list.into_iter().filter(|s| {
             if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&s.timestamp) {
@@ -179,7 +237,13 @@ pub async fn project_structure_handler(
     verify_auth(&state, &headers, query.token.as_deref())?;
 
     let req_project = query.project.as_deref().or(query.path.as_deref()).unwrap_or("PulseBridge");
-    let target_dir = resolve_project_directory(req_project);
+    let resolved_from_state = state
+        .resolve_project_by_id(req_project)
+        .and_then(|p| p.project_path)
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.exists() && p.is_dir());
+
+    let target_dir = resolved_from_state.unwrap_or_else(|| resolve_project_directory(req_project));
     let proj_name = target_dir
         .file_name()
         .map(|n| n.to_string_lossy().to_string())

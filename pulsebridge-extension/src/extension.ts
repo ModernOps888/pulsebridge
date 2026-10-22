@@ -1,6 +1,23 @@
 import * as vscode from 'vscode'
+import * as fs from 'fs'
+import * as os from 'os'
+import * as path from 'path'
 
 const BRIDGE_URL = 'http://127.0.0.1:8080'
+
+function getAuthHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  try {
+    const tokenFile = path.join(os.tmpdir(), 'pulsebridge_tokens.json')
+    if (fs.existsSync(tokenFile)) {
+      const parsed = JSON.parse(fs.readFileSync(tokenFile, 'utf8'))
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        headers['Authorization'] = `Bearer ${parsed[parsed.length - 1]}`
+      }
+    }
+  } catch (_) {}
+  return headers
+}
 
 export function activate(context: vscode.ExtensionContext) {
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100)
@@ -51,7 +68,7 @@ async function reportEvent(payload: Record<string, any>) {
   try {
     await fetch(`${BRIDGE_URL}/api/ingest/event`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify(payload),
     })
   } catch (_) {

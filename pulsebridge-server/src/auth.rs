@@ -148,6 +148,9 @@ impl AuthManager {
         // 1. Check brute force status for this client IP
         {
             let mut attempts = self.failed_attempts.write();
+            if attempts.len() > 100 {
+                attempts.retain(|_, (_, last_time)| now.duration_since(*last_time) < lockout_duration);
+            }
             if let Some((count, last_time)) = attempts.get(client_ip) {
                 if *count >= 5 {
                     if now.duration_since(*last_time) < lockout_duration {
@@ -168,11 +171,12 @@ impl AuthManager {
             // Reset failed counter
             self.failed_attempts.write().remove(client_ip);
             let new_token = Uuid::new_v4().to_string();
-            {
+            let snapshot = {
                 let mut tokens = self.authorized_tokens.write();
                 tokens.insert(new_token.clone());
-                save_persisted_tokens(&tokens);
-            }
+                tokens.clone()
+            };
+            save_persisted_tokens(&snapshot);
             Ok(new_token)
         } else {
             // Increment failed attempts

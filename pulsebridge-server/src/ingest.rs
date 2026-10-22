@@ -17,10 +17,16 @@ use crate::state::SharedState;
 pub struct IngestEventPayload {
     pub ide: Option<String>,
     pub event_type: String, // "step", "status", "milestone", "alert"
+    #[serde(default)]
+    pub step_type: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
     pub content: Option<String>,
     pub thinking: Option<String>,
     pub tool_name: Option<String>,
     pub tool_action: Option<String>,
+    #[serde(default)]
+    pub tool_calls: Option<Vec<ToolCallInfo>>,
     pub task_title: Option<String>,
     pub percent_complete: Option<u8>,
     pub status: Option<String>,
@@ -35,6 +41,10 @@ pub struct SendPromptPayload {
     pub message: String,
     pub target_ide: Option<String>,
     pub target_project: Option<String>,
+    #[serde(default)]
+    pub project_name: Option<String>,
+    #[serde(default)]
+    pub conversation_id: Option<String>,
 }
 
 pub async fn handle_ingest_event(
@@ -45,7 +55,7 @@ pub async fn handle_ingest_event(
 ) -> Result<impl IntoResponse, StatusCode> {
     verify_auth(&state, &headers, query.token.as_deref())?;
 
-    let ide_source = match payload.ide.as_deref().unwrap_or("custom").to_lowercase().as_str() {
+    let ide_source = match payload.ide.as_deref().unwrap_or("antigravity").to_lowercase().as_str() {
         "cursor" => IdeSource::Cursor,
         "antigravity" => IdeSource::Antigravity,
         "vscode" => IdeSource::VSCode,
@@ -53,26 +63,61 @@ pub async fn handle_ingest_event(
         _ => IdeSource::Custom,
     };
 
-    if let Some(title) = payload.task_title {
-        state.update_task_progress(|p| {
-            p.task_title = title;
-            p.active_ide = ide_source.clone();
-            if let Some(percent) = payload.percent_complete {
-                p.percent_complete = percent;
-            }
-        });
-    }
-
     if payload.event_type == "alert" {
+        let default_title = format!("Alert from {}", ide_source);
+        let alert_title = payload.task_title.as_deref().unwrap_or(&default_title);
         state.send_alert(
             payload.status.as_deref().unwrap_or("info"),
-            &format!("Alert from {}", ide_source),
+            alert_title,
             payload.content.as_deref().unwrap_or(""),
         );
         return Ok((StatusCode::OK, Json(json!({ "status": "alert_broadcasted" }))));
     }
 
-    let tool_calls = if let Some(tname) = payload.tool_name {
+    if payload.event_type == "status" {
+        let mapped_status = payload.status.as_deref().map(|s| match s.to_lowercase().as_str() {
+            "thinking" => crate::models::AgentStatus::Thinking,
+            "runningtool" | "running_tool" | "running" => crate::models::AgentStatus::RunningTool,
+            "waitinginput" | "waiting_input" | "waiting" => crate::models::AgentStatus::WaitingInput,
+            "completed" | "done" => crate::models::AgentStatus::Completed,
+            "failed" | "error" => crate::models::AgentStatus::Failed,
+            _ => crate::models::AgentStatus::Idle,
+        });
+
+        state.update_task_progress(|p| {
+            if let Some(ref title) = payload.task_title {
+                p.task_title = title.clone();
+            }
+            if let Some(ref step_desc) = payload.content {
+                p.current_step_desc = step_desc.clone();
+            }
+            if let Some(percent) = payload.percent_complete {
+                p.percent_complete = percent;
+            }
+            if let Some(st) = mapped_status {
+                p.status = st;
+            }
+            p.active_ide = ide_source.clone();
+        });
+        return Ok((StatusCode::OK, Json(json!({ "status": "status_updated" }))));
+    }
+
+    if let Some(ref title) = payload.task_title {
+        let t = title.clone();
+        let ide_c = ide_source.clone();
+        let pct = payload.percent_complete;
+        state.update_task_progress(|p| {
+            p.task_title = t;
+            p.active_ide = ide_c;
+            if let Some(percent) = pct {
+                p.percent_complete = percent;
+            }
+        });
+    }
+
+    let tool_calls = if payload.tool_calls.is_some() {
+        payload.tool_calls
+    } else if let Some(tname) = payload.tool_name {
         Some(vec![ToolCallInfo {
             tool_name: tname,
             action: payload.tool_action.unwrap_or_else(|| "Running".to_string()),
@@ -86,12 +131,20 @@ pub async fn handle_ingest_event(
         None
     };
 
+    let resolved_step_type = payload.step_type.unwrap_or_else(|| {
+        if tool_calls.is_some() {
+            "PLANNER_RESPONSE".to_string()
+        } else {
+            "EVENT".to_string()
+        }
+    });
+
     let step = ChatStep {
         id: Uuid::new_v4().to_string(),
         step_index: state.get_recent_steps().len() as u64 + 1,
         timestamp: Local::now().to_rfc3339(),
-        source: "MODEL".to_string(),
-        step_type: "EVENT".to_string(),
+        source: payload.source.unwrap_or_else(|| "MODEL".to_string()),
+        step_type: resolved_step_type,
         status: payload.status.unwrap_or_else(|| "DONE".to_string()),
         content: payload.content,
         thinking: payload.thinking,
@@ -133,10 +186,31 @@ pub async fn handle_send_prompt(
         action_mode: Some(crate::remote_action::RemoteActionMode::InjectWindow),
         project_path: payload.target_project,
         command: None,
+        project_name: payload.project_name,
+        conversation_id: payload.conversation_id,
     };
 
     let result = crate::remote_action::RemoteActionDispatcher::dispatch(cmd, &state).await;
     Ok((StatusCode::OK, Json(result)))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InboxQuery {
+    pub token: Option<String>,
+    pub unread_only: Option<bool>,
+    pub ack: Option<bool>,
+}
+
+pub async fn handle_get_inbox(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(query): Query<InboxQuery>,
+) -> Result<impl IntoResponse, StatusCode> {
+    verify_auth(&state, &headers, query.token.as_deref())?;
+    let unread_only = query.unread_only.unwrap_or(true);
+    let mark_read = query.ack.unwrap_or(false);
+    let items = state.get_inbox_messages(unread_only, mark_read);
+    Ok((StatusCode::OK, Json(json!({ "success": true, "messages": items }))))
 }
 
 pub async fn handle_remote_action(

@@ -144,6 +144,8 @@ pub struct SystemTelemetry {
     pub server_port: u16,
     pub active_ide_name: String,
     pub uptime_seconds: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell_commands_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,7 +164,17 @@ pub enum WsClientMessage {
     #[serde(rename = "auth")]
     Auth { token: String },
     #[serde(rename = "send_prompt")]
-    SendPrompt { message: String, target_ide: Option<IdeSource> },
+    SendPrompt {
+        message: String,
+        #[serde(default)]
+        target_ide: Option<IdeSource>,
+        #[serde(default)]
+        project_name: Option<String>,
+        #[serde(default)]
+        conversation_id: Option<String>,
+        #[serde(default)]
+        project_path: Option<String>,
+    },
     #[serde(rename = "request_snapshot")]
     RequestSnapshot { window_id: Option<isize>, quality: Option<u8> },
     #[serde(rename = "emergency_stop")]

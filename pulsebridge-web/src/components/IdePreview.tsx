@@ -29,6 +29,7 @@ interface IdePreviewProps {
   windows: IdeWindowInfo[]
   token: string | null
   onRequestSnapshot: (windowId?: number, quality?: number) => void
+  onRefreshWindows?: () => void
   latestFrame: string | null
   onScroll?: (delta: number, xRatio?: number, yRatio?: number, windowId?: number) => void
   onHotkey?: (key: string, windowId?: number | null) => void
@@ -39,6 +40,7 @@ export function IdePreview({
   windows,
   token,
   onRequestSnapshot,
+  onRefreshWindows,
   latestFrame,
   onScroll,
   onHotkey,
@@ -63,12 +65,26 @@ export function IdePreview({
   // Mini-map radar overlay visibility
   const [showMinimap, setShowMinimap] = useState<boolean>(true)
 
-  // Touch-to-click ripple & touch-drag remote scroll indicator
+  // Touch-to-click ripple, touch-drag remote scroll indicator & action feedback toast
   const [clickIndicator, setClickIndicator] = useState<{ x: number; y: number } | null>(null)
   const [scrollIndicator, setScrollIndicator] = useState<{ dir: 'up' | 'down' } | null>(null)
+  const [actionToast, setActionToast] = useState<string | null>(null)
   const scrollIndicatorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const actionToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [quickTypeText, setQuickTypeText] = useState('')
+  const [customHotkey, setCustomHotkey] = useState('')
   const [autoEnterOnType, setAutoEnterOnType] = useState<boolean>(true)
+
+  const showFeedback = useCallback((msg: string) => {
+    try {
+      if (typeof navigator !== 'undefined' && navigator.vibrate) {
+        navigator.vibrate(14)
+      }
+    } catch (_) {}
+    setActionToast(msg)
+    if (actionToastTimerRef.current) clearTimeout(actionToastTimerRef.current)
+    actionToastTimerRef.current = setTimeout(() => setActionToast(null), 1800)
+  }, [])
 
   // Viewport scroll metrics for high-contrast on-screen scrollbars & radar
   const [scrollMetrics, setScrollMetrics] = useState({
@@ -216,29 +232,36 @@ export function IdePreview({
   const jumpToTop = () => scrollToRatio(undefined, 0, true)
   const jumpToBottom = () => scrollToRatio(undefined, 1, true)
 
-  // Zoom Handler with focal preservation
-  const handleZoomChange = (newZoom: number) => {
-    const oldZoom = zoomLevel
-    setZoomLevel(newZoom)
+  // Multi-touch pinch-to-zoom state
+  const activePointersRef = useRef<Map<number, { x: number; y: number }>>(new Map())
+  const pinchStateRef = useRef<{ initialDistance: number; initialZoom: number } | null>(null)
 
-    if (viewportRef.current) {
+  // Zoom Handler with accurate focal preservation
+  const handleZoomChange = useCallback(
+    (rawZoom: number) => {
+      const clampedZoom = Math.max(1, Math.min(3, Number(rawZoom.toFixed(2))))
       const el = viewportRef.current
-      const currentCenterX = (el.scrollLeft + el.clientWidth / 2) / (oldZoom || 1)
-      const currentCenterY = (el.scrollTop + el.clientHeight / 2) / (oldZoom || 1)
+      const normX = el
+        ? (el.scrollLeft + el.clientWidth / 2) / Math.max(1, el.scrollWidth)
+        : 0.5
+      const normY = el
+        ? (el.scrollTop + el.clientHeight / 2) / Math.max(1, el.scrollHeight)
+        : 0.5
 
-      setTimeout(() => {
+      setZoomLevel(clampedZoom)
+
+      requestAnimationFrame(() => {
         if (!viewportRef.current) return
-        const newScrollX = currentCenterX * newZoom - viewportRef.current.clientWidth / 2
-        const newScrollY = currentCenterY * newZoom - viewportRef.current.clientHeight / 2
-        viewportRef.current.scrollTo({
-          left: Math.max(0, newScrollX),
-          top: Math.max(0, newScrollY),
-          behavior: 'smooth',
-        })
+        const vp = viewportRef.current
+        const targetScrollX = Math.max(0, normX * vp.scrollWidth - vp.clientWidth / 2)
+        const targetScrollY = Math.max(0, normY * vp.scrollHeight - vp.clientHeight / 2)
+        vp.scrollLeft = targetScrollX
+        vp.scrollTop = targetScrollY
         updateScrollMetrics()
-      }, 50)
-    }
-  }
+      })
+    },
+    [updateScrollMetrics]
+  )
 
   // Remote click execution with precision coordinate mapping
   const executeRemoteClick = async (clientX: number, clientY: number) => {
@@ -260,6 +283,9 @@ export function IdePreview({
 
     setClickIndicator({ x: clickX, y: clickY })
     setTimeout(() => setClickIndicator(null), 650)
+    const label =
+      clickType === 'right' ? 'Right-Click' : clickType === 'double' ? '2x Click' : 'Click'
+    showFeedback(`✓ ${label} (${Math.round(xRatio * 100)}%, ${Math.round(yRatio * 100)}%)`)
 
     try {
       await fetch('/api/action/click', {
@@ -282,9 +308,22 @@ export function IdePreview({
     }
   }
 
-  // Pointer event handlers for the viewport: Smart gesture detection
+  // Pointer event handlers for the viewport: Smart gesture & 2-finger pinch-to-zoom detection
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!viewportRef.current) return
+    activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
+
+    if (activePointersRef.current.size === 2) {
+      const pts = Array.from(activePointersRef.current.values())
+      const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y)
+      pinchStateRef.current = {
+        initialDistance: Math.max(20, dist),
+        initialZoom: zoomLevel,
+      }
+      pointerStateRef.current.hasMoved = true
+      return
+    }
+
     pointerStateRef.current = {
       isDown: true,
       startX: e.clientX,
@@ -304,6 +343,19 @@ export function IdePreview({
   }
 
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (activePointersRef.current.has(e.pointerId)) {
+      activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
+    }
+
+    // 2-finger pinch-to-zoom
+    if (activePointersRef.current.size === 2 && pinchStateRef.current) {
+      const pts = Array.from(activePointersRef.current.values())
+      const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y)
+      const scale = dist / pinchStateRef.current.initialDistance
+      handleZoomChange(pinchStateRef.current.initialZoom * scale)
+      return
+    }
+
     if (!pointerStateRef.current.isDown || !viewportRef.current) return
     const state = pointerStateRef.current
     const dx = e.clientX - state.startX
@@ -360,6 +412,11 @@ export function IdePreview({
   }
 
   const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    activePointersRef.current.delete(e.pointerId)
+    if (activePointersRef.current.size < 2) {
+      pinchStateRef.current = null
+    }
+
     if (!pointerStateRef.current.isDown) return
     const { hasMoved, startTime } = pointerStateRef.current
     pointerStateRef.current.isDown = false
@@ -375,6 +432,15 @@ export function IdePreview({
       // Swiping/scrolling finished: refresh frame snapshot
       setTimeout(fetchSnapshot, 200)
     }
+  }
+
+  const handlePointerCancel = (e: React.PointerEvent<HTMLDivElement>) => {
+    activePointersRef.current.delete(e.pointerId)
+    pinchStateRef.current = null
+    pointerStateRef.current.isDown = false
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId)
+    } catch (_) {}
   }
 
   // Interactive Horizontal Gilded Scroll Track Pointer Drag
@@ -453,8 +519,11 @@ export function IdePreview({
   // Remote IDE Scroll Trigger (Win32 simulate_scroll)
   const triggerRemoteScroll = async (deltaBase: number, xRatio?: number, yRatio?: number) => {
     const delta = deltaBase * scrollSpeedMultiplier
+    const targetX = xRatio ?? 0.5
+    const targetY = yRatio ?? 0.5
+    showFeedback(`✓ Scrolled ${delta > 0 ? '▲ Up' : '▼ Down'} (${Math.abs(delta)})`)
     if (onScroll) {
-      onScroll(delta, xRatio, yRatio, selectedWindowId)
+      onScroll(delta, targetX, targetY, selectedWindowId)
     } else {
       try {
         await fetch('/api/action/scroll', {
@@ -466,8 +535,8 @@ export function IdePreview({
           body: JSON.stringify({
             delta,
             window_id: selectedWindowId,
-            x_ratio: xRatio,
-            y_ratio: yRatio,
+            x_ratio: targetX,
+            y_ratio: targetY,
           }),
         })
       } catch (err) {
@@ -480,15 +549,27 @@ export function IdePreview({
   // Mouse wheel listener over preview image
   const handleWheel = (e: React.WheelEvent) => {
     if (interactionMode === 'click') {
+      let xRatio: number | undefined
+      let yRatio: number | undefined
+      if (imgRef.current) {
+        const rect = imgRef.current.getBoundingClientRect()
+        if (rect.width > 0 && rect.height > 0) {
+          xRatio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+          yRatio = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height))
+        }
+      }
       const delta = e.deltaY < 0 ? 120 : -120
-      triggerRemoteScroll(delta)
+      triggerRemoteScroll(delta, xRatio, yRatio)
     }
   }
 
   // Send hotkey
   const sendHotkey = async (key: string) => {
+    const cleanKey = key.trim().toLowerCase()
+    if (!cleanKey) return
+    showFeedback(`✓ Key: ${cleanKey.replace(/_/g, '+').toUpperCase()}`)
     if (onHotkey) {
-      onHotkey(key, selectedWindowId)
+      onHotkey(cleanKey, selectedWindowId)
     } else {
       try {
         await fetch('/api/action/hotkey', {
@@ -497,7 +578,7 @@ export function IdePreview({
             'Content-Type': 'application/json',
             Authorization: `Bearer ${token}`,
           },
-          body: JSON.stringify({ key, window_id: selectedWindowId }),
+          body: JSON.stringify({ key: cleanKey, window_id: selectedWindowId }),
         })
       } catch (err) {
         console.error('Failed to send hotkey', err)
@@ -509,12 +590,12 @@ export function IdePreview({
   const handleQuickType = async () => {
     if (!quickTypeText.trim()) return
     const text = quickTypeText
-    setQuickTypeText('')
+    let ok = false
     if (onTypeText) {
-      await onTypeText(text, selectedWindowId, autoEnterOnType)
+      ok = await onTypeText(text, selectedWindowId, autoEnterOnType)
     } else {
       try {
-        await fetch('/api/action/type', {
+        const res = await fetch('/api/action/type', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -526,9 +607,16 @@ export function IdePreview({
             press_enter: autoEnterOnType,
           }),
         })
+        ok = res.ok
       } catch (err) {
         console.error('Failed to type text', err)
       }
+    }
+    if (ok) {
+      setQuickTypeText('')
+      showFeedback(`✓ Typed ${text.length} chars${autoEnterOnType ? ' + Enter' : ''}`)
+    } else {
+      showFeedback('⚠ Failed to send text')
     }
     setTimeout(fetchSnapshot, 400)
   }
@@ -743,10 +831,10 @@ export function IdePreview({
               onPointerDown={handlePointerDown}
               onPointerMove={handlePointerMove}
               onPointerUp={handlePointerUp}
-              onPointerCancel={handlePointerUp}
+              onPointerCancel={handlePointerCancel}
               onWheel={handleWheel}
               onScroll={updateScrollMetrics}
-              className={`viewport-zoom-scroll relative w-full overflow-auto p-2 select-none touch-pan-x touch-pan-y ${
+              className={`viewport-zoom-scroll relative w-full overflow-auto p-2 select-none touch-none ${
                 theaterMode ? 'max-h-[75vh]' : 'max-h-[62vh] sm:max-h-[72vh]'
               } ${
                 zoomLevel > 1
@@ -754,9 +842,9 @@ export function IdePreview({
                   : 'flex items-center justify-center min-h-[240px]'
               }`}
             >
-              {/* Scaled Canvas Wrapper: Never clips negative scroll coordinates */}
+              {/* Scaled Canvas Wrapper: No CSS width transition lag so focal preservation is instant */}
               <div
-                className="relative inline-block transition-all duration-150"
+                className="relative inline-block"
                 style={{
                   width: zoomLevel > 1 ? `${zoomLevel * 100}%` : '100%',
                   minWidth: zoomLevel > 1 ? `${zoomLevel * 100}%` : '100%',
@@ -792,9 +880,20 @@ export function IdePreview({
               </div>
             </div>
 
+            {/* Live Action Feedback Toast Pill */}
+            {actionToast && (
+              <div className="absolute top-3 right-3 z-40 pointer-events-none bg-[#060907]/95 border border-amber-400 text-amber-300 text-[10px] font-mono font-bold px-2.5 py-1 rounded-xl shadow-[0_0_15px_rgba(234,179,8,0.5)] animate-fadeIn">
+                {actionToast}
+              </div>
+            )}
+
             {/* Vertical Gilded Scrollbar (Right Edge) */}
             {scrollMetrics.hasVScroll && (
-              <div className="absolute right-0 top-0 bottom-12 w-6 bg-[#050806]/85 border-l border-amber-500/40 flex flex-col items-center justify-between p-1 z-30 select-none backdrop-blur-sm">
+              <div
+                className={`absolute right-0 top-0 ${
+                  scrollMetrics.hasHScroll ? 'bottom-20' : 'bottom-10'
+                } w-6 bg-[#050806]/85 border-l border-amber-500/40 flex flex-col items-center justify-between p-1 z-30 select-none backdrop-blur-sm`}
+              >
                 <button
                   onClick={jumpToTop}
                   className="p-1 rounded bg-[#0d140f] hover:bg-amber-950 text-amber-300 text-[9px]"
@@ -890,6 +989,56 @@ export function IdePreview({
                 </span>
               </div>
             )}
+
+            {/* Docked Precision Zoom & Preset Bar (Never overlaps IDE canvas) */}
+            <div className="bg-[#060907] border-t border-emerald-950/90 px-2.5 py-1.5 flex items-center justify-between gap-1.5 z-30 shrink-0 overflow-x-auto">
+              <span className="text-[9px] font-mono text-emerald-500 hidden sm:inline shrink-0">
+                Pinch or Select Zoom:
+              </span>
+              <div className="flex items-center gap-1 ml-auto">
+                <button
+                  onClick={() => handleZoomChange(Math.max(1, Number((zoomLevel - 0.25).toFixed(2))))}
+                  className="p-1.5 rounded-lg bg-[#0d140f] hover:bg-emerald-950 text-emerald-300"
+                  title="Zoom Out"
+                >
+                  <ZoomOut className="w-3.5 h-3.5" />
+                </button>
+
+                {/* Presets: Fit (100%), 125%, 150%, 175%, 200%, 250%, 300% */}
+                {[1, 1.25, 1.5, 1.75, 2, 2.5, 3].map((lvl) => (
+                  <button
+                    key={lvl}
+                    onClick={() => handleZoomChange(lvl)}
+                    className={`px-1.5 py-1 rounded-lg text-[9px] font-mono font-bold transition-all ${
+                      Math.abs(zoomLevel - lvl) < 0.05
+                        ? 'bg-amber-950 border border-amber-500 text-amber-300 shadow-[0_0_8px_rgba(234,179,8,0.5)]'
+                        : 'bg-[#0d140f] text-emerald-500 hover:text-emerald-300'
+                    }`}
+                  >
+                    {lvl === 1 ? 'Fit' : `${Math.round(lvl * 100)}%`}
+                  </button>
+                ))}
+
+                <button
+                  onClick={() => handleZoomChange(Math.min(3, Number((zoomLevel + 0.25).toFixed(2))))}
+                  className="p-1.5 rounded-lg bg-[#0d140f] hover:bg-emerald-950 text-emerald-300"
+                  title="Zoom In"
+                >
+                  <ZoomIn className="w-3.5 h-3.5" />
+                </button>
+
+                <button
+                  onClick={() => {
+                    handleZoomChange(1)
+                    jumpToCenter()
+                  }}
+                  className="p-1.5 rounded-lg bg-[#0d140f] hover:bg-emerald-950 text-amber-400"
+                  title="Reset to 100% Fit"
+                >
+                  <Maximize2 className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
           </div>
         ) : (
           <div className="text-center p-8 text-xs text-emerald-600/70 space-y-2 font-mono flex flex-col items-center justify-center min-h-[220px]">
@@ -897,52 +1046,6 @@ export function IdePreview({
             <p>Streaming IDE workspace canvas...</p>
           </div>
         )}
-
-        {/* Floating Zoom & Preset Bar */}
-        <div className="absolute bottom-12 sm:bottom-14 right-3 flex items-center gap-1 bg-[#060907]/90 backdrop-blur-md p-1.5 rounded-xl border border-emerald-900/80 shadow-2xl z-30">
-          <button
-            onClick={() => handleZoomChange(Math.max(0.75, Number((zoomLevel - 0.25).toFixed(2))))}
-            className="p-1.5 rounded-lg bg-[#0d140f] hover:bg-emerald-950 text-emerald-300"
-            title="Zoom Out"
-          >
-            <ZoomOut className="w-3.5 h-3.5" />
-          </button>
-
-          {/* Presets: Fit (100%), 125%, 150%, 175%, 200% */}
-          {[1, 1.25, 1.5, 1.75, 2].map((lvl) => (
-            <button
-              key={lvl}
-              onClick={() => handleZoomChange(lvl)}
-              className={`px-1.5 py-1 rounded-lg text-[9px] font-mono font-bold transition-all ${
-                zoomLevel === lvl
-                  ? 'bg-amber-950 border border-amber-500 text-amber-300 shadow-[0_0_8px_rgba(234,179,8,0.5)]'
-                  : 'bg-[#0d140f] text-emerald-500 hover:text-emerald-300'
-              }`}
-            >
-              {lvl === 1 ? 'Fit' : `${Math.round(lvl * 100)}%`}
-            </button>
-          ))}
-
-          <button
-            onClick={() => handleZoomChange(Math.min(2.5, Number((zoomLevel + 0.25).toFixed(2))))}
-            className="p-1.5 rounded-lg bg-[#0d140f] hover:bg-emerald-950 text-emerald-300"
-            title="Zoom In"
-          >
-            <ZoomIn className="w-3.5 h-3.5" />
-          </button>
-
-          <button
-            onClick={() => {
-              handleZoomChange(1)
-              jumpToCenter()
-            }}
-            className="p-1.5 rounded-lg bg-[#0d140f] hover:bg-emerald-950 text-amber-400"
-            title="Reset to 100% Fit"
-          >
-            <Maximize2 className="w-3.5 h-3.5" />
-          </button>
-
-        </div>
 
         {/* Picture-in-Picture Mini-Map Spatial Radar */}
         {zoomLevel > 1 && showMinimap && (
@@ -1147,6 +1250,58 @@ export function IdePreview({
             </button>
           ))}
         </div>
+
+        {/* Quaternary Shortcuts: Layout, Search, Comment & Custom Key Chord */}
+        <div className="grid grid-cols-4 sm:grid-cols-8 gap-1.5 pt-1 border-t border-emerald-950/80">
+          {[
+            { label: 'Ctrl+/', id: 'ctrl_slash', hint: 'Comment' },
+            { label: 'Space', id: 'space', hint: 'Spacebar' },
+            { label: 'Ctrl+B', id: 'ctrl_b', hint: 'Sidebar' },
+            { label: 'Ctrl+J', id: 'ctrl_j', hint: 'Panel' },
+            { label: 'Ctrl+F', id: 'ctrl_f', hint: 'Find' },
+            { label: 'Ctrl+W', id: 'ctrl_w', hint: 'Close Tab' },
+            { label: '⇧+Tab', id: 'shift_tab', hint: 'Outdent' },
+            { label: 'Alt+Z', id: 'alt_z', hint: 'Word Wrap' },
+          ].map((key) => (
+            <button
+              key={key.id}
+              onClick={() => sendHotkey(key.id)}
+              className="py-1.5 sm:py-2 px-1 rounded-xl bg-[#0d140f] border border-emerald-950 hover:border-amber-400 text-emerald-200 active:bg-amber-600 active:text-black transition-all text-center flex flex-col items-center justify-center hover:scale-[1.02] min-w-0 overflow-hidden"
+            >
+              <span className="text-[10px] sm:text-[11px] font-mono font-bold text-emerald-300 truncate max-w-full">{key.label}</span>
+              <span className="text-[7.5px] sm:text-[8px] text-emerald-500/80 truncate max-w-full">{key.hint}</span>
+            </button>
+          ))}
+        </div>
+
+        {/* Custom Key / Chord Input */}
+        <div className="flex items-center gap-2 pt-1.5 border-t border-emerald-950/80">
+          <input
+            type="text"
+            value={customHotkey}
+            onChange={(e) => setCustomHotkey(e.target.value)}
+            placeholder="Custom hotkey (e.g. ctrl_shift_f, f12, alt_up)..."
+            className="flex-1 bg-[#0d140f] border border-emerald-900/80 rounded-xl px-2.5 py-1.5 text-[11px] text-amber-100 placeholder-emerald-600/60 focus:outline-none focus:border-amber-400 font-mono"
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && customHotkey.trim()) {
+                sendHotkey(customHotkey)
+                setCustomHotkey('')
+              }
+            }}
+          />
+          <button
+            onClick={() => {
+              if (customHotkey.trim()) {
+                sendHotkey(customHotkey)
+                setCustomHotkey('')
+              }
+            }}
+            disabled={!customHotkey.trim()}
+            className="px-3 py-1.5 rounded-xl bg-[#0d140f] border border-amber-500/40 hover:border-amber-400 disabled:opacity-40 text-amber-300 text-[10px] font-mono font-bold shrink-0"
+          >
+            Send Key
+          </button>
+        </div>
       </div>
 
       {/* Remote Quick Type Input (Types directly at active cursor focus) */}
@@ -1183,10 +1338,24 @@ export function IdePreview({
 
       {/* Discovered Windows List */}
       <div className="rounded-2xl bg-[#0a0f0c] border border-emerald-950 p-4 space-y-2 shrink-0">
-        <h4 className="text-xs font-bold text-gray-300 flex items-center gap-1.5">
-          <Layers className="w-3.5 h-3.5 text-amber-400" />
-          Discovered Open IDE Windows ({windows.length})
-        </h4>
+        <div className="flex items-center justify-between">
+          <h4 className="text-xs font-bold text-gray-300 flex items-center gap-1.5">
+            <Layers className="w-3.5 h-3.5 text-amber-400" />
+            Discovered Open IDE Windows ({windows.length})
+          </h4>
+          {onRefreshWindows && (
+            <button
+              onClick={() => {
+                onRefreshWindows()
+                showFeedback('✓ Refreshed IDE windows')
+              }}
+              className="px-2 py-1 rounded-lg bg-[#0d140f] border border-emerald-900/80 hover:border-amber-400 text-[10px] font-mono text-amber-300 flex items-center gap-1"
+            >
+              <RefreshCw className="w-3 h-3" />
+              <span>Rescan</span>
+            </button>
+          )}
+        </div>
         <div className="space-y-1.5">
           {windows.map((win) => (
             <div

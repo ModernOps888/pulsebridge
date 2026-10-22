@@ -5,8 +5,8 @@ use parking_lot::Mutex;
 use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
-    GetDIBits, ReleaseDC, SelectObject, StretchBlt, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
-    SRCCOPY,
+    GetDIBits, ReleaseDC, SelectObject, SetBrushOrgEx, SetStretchBltMode, StretchBlt, BITMAPINFO,
+    BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, SRCCOPY,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetSystemMetrics, GetWindowRect, GetWindowTextW,
@@ -119,7 +119,11 @@ unsafe extern "system" fn enum_windows_callback(hwnd: HWND, lparam: LPARAM) -> B
         Some(IdeSource::Antigravity)
     } else if proc_name.contains("cursor") || title_lower.contains("cursor") {
         Some(IdeSource::Cursor)
-    } else if proc_name.contains("code") || title_lower.contains("visual studio code") || title_lower.contains(" - code") {
+    } else if proc_name == "code.exe"
+        || proc_name == "code - insiders.exe"
+        || title_lower.contains("visual studio code")
+        || title_lower.ends_with(" - code")
+    {
         Some(IdeSource::VSCode)
     } else if proc_name.contains("devenv") || title_lower.contains("visual studio") {
         Some(IdeSource::VisualStudio)
@@ -133,13 +137,13 @@ unsafe extern "system" fn enum_windows_callback(hwnd: HWND, lparam: LPARAM) -> B
         let width = rect.right - rect.left;
         let height = rect.bottom - rect.top;
 
-        if width > 120 && height > 120 {
+        if (width > 120 && height > 120) || (is_minimized && ide != IdeSource::Custom) {
             context.windows.push(IdeWindowInfo {
                 hwnd: hwnd as isize,
                 title,
                 ide,
-                width,
-                height,
+                width: if is_minimized { 1920 } else { width },
+                height: if is_minimized { 1080 } else { height },
                 is_minimized,
             });
         }
@@ -277,7 +281,7 @@ impl ScreenCapturer {
                         let width = rect.right - rect.left;
                         let height = rect.bottom - rect.top;
 
-                        if width <= 0 || height <= 0 {
+                        if width <= 120 || height <= 120 || IsIconic(hwnd_target) != 0 {
                             let w = GetSystemMetrics(SM_CXSCREEN).max(800);
                             let h = GetSystemMetrics(SM_CYSCREEN).max(600);
                             Self::capture_hwnd_internal(0, 0, 0, w, h, quality)
@@ -376,13 +380,13 @@ impl ScreenCapturer {
             return Err("Failed to create compatible memory DC".to_string());
         }
 
-        // Scale resolution for mobile optimization if 4K or ultra-wide
+        // Scale resolution for mobile optimization if 4K or ultra-wide (preserve exact aspect ratio for 1:1 click mapping)
         let max_w = 1920;
         let max_h = 1080;
         let (out_w, out_h) = if width > max_w || height > max_h {
             let scale = (max_w as f32 / width as f32).min(max_h as f32 / height as f32);
-            let sw = ((width as f32 * scale).round() as i32).max(640);
-            let sh = ((height as f32 * scale).round() as i32).max(360);
+            let sw = ((width as f32 * scale).round() as i32).max(1);
+            let sh = ((height as f32 * scale).round() as i32).max(1);
             (sw, sh)
         } else {
             (width, height)
@@ -396,6 +400,9 @@ impl ScreenCapturer {
         }
 
         let old_bitmap = SelectObject(hdc_mem, hbitmap);
+        // Set HALFTONE (4) stretch mode so downscaled IDE text remains crisp
+        let _ = SetStretchBltMode(hdc_mem, 4);
+        let _ = SetBrushOrgEx(hdc_mem, 0, 0, std::ptr::null_mut());
 
         // If targeting a specific window (and it is not minimized), try PrintWindow(PW_RENDERFULLCONTENT = 2)
         // so occluded windows still render their own surface cleanly.

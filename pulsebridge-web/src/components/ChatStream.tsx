@@ -29,15 +29,35 @@ import {
   AlertTriangle,
   Activity,
 } from 'lucide-react'
-import type { ChatStep, ProjectChatInfo, ProjectFileEntry, ProjectStructureResponse, ToolCallInfo } from '../types'
+import type {
+  ChatStep,
+  ProjectChatInfo,
+  ProjectFileEntry,
+  ProjectStructureResponse,
+  PromptContextOptions,
+  ToolCallInfo,
+} from '../types'
 
 interface ChatStreamProps {
   steps: ChatStep[]
   projects?: ProjectChatInfo[]
-  onSendPrompt: (message: string) => void
+  onSendPrompt: (message: string, options?: PromptContextOptions) => void
   onRefreshProjects?: (days?: number) => void
   onLoadConversation?: (convId: string, days?: number) => Promise<ChatStep[]>
   onFetchProjectStructure?: (projectOrPath: string) => Promise<ProjectStructureResponse | null>
+}
+
+function extractDecisionOptions(content: string): { cleanContent: string; options: string[] } {
+  const match = content.match(/\[OPTIONS:\s*([^\]]+)\]/i)
+  if (!match) {
+    return { cleanContent: content, options: [] }
+  }
+  const options = match[1]
+    .split('|')
+    .map((o) => o.trim())
+    .filter(Boolean)
+  const cleanContent = content.replace(/\[OPTIONS:\s*[^\]]+\]/gi, '').trim()
+  return { cleanContent, options }
 }
 
 type ViewMode = 'turns' | 'steps' | 'responses'
@@ -510,13 +530,30 @@ export function ChatStream({
     )
   }, [projects, projectSearch])
 
-  // Filter steps by selected project/conversation
+  // Filter steps by selected project/conversation without cross-conversation bleed
   const displayedSteps = useMemo(() => {
     let base = steps
     if (selectedProjectId !== 'ALL') {
       const targetProj = projects.find((p) => p.id === selectedProjectId)
+      const isWorkspaceId =
+        selectedProjectId.startsWith('project-') ||
+        selectedProjectId.startsWith('cursor-') ||
+        selectedProjectId.startsWith('vscode-') ||
+        selectedProjectId === 'pulsebridge'
+
       base = steps.filter((s) => {
-        if (s.conversation_id && s.conversation_id === selectedProjectId) return true
+        if (s.conversation_id) {
+          if (s.conversation_id === selectedProjectId) return true
+          if (
+            isWorkspaceId &&
+            targetProj &&
+            s.project_name &&
+            s.project_name.toLowerCase() === targetProj.project_name.toLowerCase()
+          ) {
+            return true
+          }
+          return false
+        }
         if (
           targetProj &&
           s.project_name &&
@@ -699,16 +736,38 @@ export function ChatStream({
     setExpandedTools((prev) => ({ ...prev, [key]: !prev[key] }))
   }
 
+  const [promptSentToast, setPromptSentToast] = useState<string | null>(null)
+
   const copyText = (text: string, id: string) => {
     navigator.clipboard?.writeText(text)
     setCopiedId(id)
     setTimeout(() => setCopiedId(null), 1800)
   }
 
+  const sendContextualPrompt = (text: string) => {
+    const clean = text.trim()
+    if (!clean) return
+    try {
+      if (typeof navigator !== 'undefined' && navigator.vibrate) {
+        navigator.vibrate(15)
+      }
+    } catch (_) {}
+    onSendPrompt(clean, {
+      targetIde: activeProjectInfo?.ide,
+      projectName: activeProjectInfo?.project_name,
+      conversationId: selectedProjectId !== 'ALL' ? selectedProjectId : undefined,
+      projectPath: activeProjectInfo?.project_path,
+    })
+    setPromptSentToast(
+      `✓ Sent to ${activeProjectInfo ? activeProjectInfo.project_name : 'Active IDE'}`
+    )
+    setTimeout(() => setPromptSentToast(null), 2000)
+  }
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     if (!promptInput.trim()) return
-    onSendPrompt(promptInput.trim())
+    sendContextualPrompt(promptInput)
     setPromptInput('')
   }
 
@@ -777,7 +836,7 @@ export function ChatStream({
               const nextState = !showProjectDrawer
               setShowProjectDrawer(nextState)
               if (nextState && onRefreshProjects) {
-                onRefreshProjects()
+                onRefreshProjects(historyDays)
               }
             }}
             className="flex-1 flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-[#0a0f0c] border border-amber-500/40 hover:border-amber-400 text-left transition-all shadow-sm min-w-0"
@@ -866,30 +925,45 @@ export function ChatStream({
             </button>
           </div>
 
-          <span className="text-[9px] font-mono text-emerald-500/80 hidden sm:inline">
-            Live Transcript Sync
-          </span>
+          {promptSentToast ? (
+            <span className="text-[9.5px] font-mono font-bold text-amber-300 bg-amber-950/80 border border-amber-500/50 px-2 py-0.5 rounded-lg animate-fadeIn">
+              {promptSentToast}
+            </span>
+          ) : (
+            <span className="text-[9px] font-mono text-emerald-500/80 hidden sm:inline">
+              Live Transcript Sync
+            </span>
+          )}
         </div>
 
         {/* Collapsible Project & Chat Switcher Drawer */}
         {showProjectDrawer && (
           <div className="mt-2 rounded-2xl bg-[#0a0f0c] border border-amber-500/50 p-3 shadow-2xl space-y-2.5 animate-slideDown max-h-80 flex flex-col">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between flex-wrap gap-1.5">
               <span className="text-[10px] font-mono uppercase tracking-wider text-amber-400 font-bold flex items-center gap-1.5">
-                <FolderGit2 className="w-3.5 h-3.5" /> Active Chats (Last {historyDays} Days) ({projects.length})
+                <FolderGit2 className="w-3.5 h-3.5" /> Active Chats ({projects.length})
               </span>
-              <div className="flex items-center gap-1.5">
-                {historyDays === 30 && onRefreshProjects && (
+              <div className="flex items-center gap-1">
+                {[
+                  { label: '7d', days: 7 },
+                  { label: '30d', days: 30 },
+                  { label: 'All', days: 3650 },
+                ].map((opt) => (
                   <button
+                    key={opt.days}
                     onClick={() => {
-                      setHistoryDays(3650)
-                      onRefreshProjects(3650)
+                      setHistoryDays(opt.days)
+                      onRefreshProjects?.(opt.days)
                     }}
-                    className="text-[9px] font-mono text-amber-300 hover:text-amber-200 px-2 py-0.5 rounded bg-amber-950/60 border border-amber-500/40"
+                    className={`text-[9px] font-mono px-2 py-0.5 rounded border transition-all ${
+                      historyDays === opt.days
+                        ? 'bg-amber-500 text-black font-bold border-amber-300'
+                        : 'bg-amber-950/40 text-amber-300 border-amber-500/30 hover:border-amber-400'
+                    }`}
                   >
-                    Load All History
+                    {opt.label}
                   </button>
-                )}
+                ))}
                 {onRefreshProjects && (
                   <button
                     onClick={() => onRefreshProjects(historyDays)}
@@ -914,9 +988,12 @@ export function ChatStream({
 
             <div className="overflow-y-auto space-y-1.5 pr-1 max-h-52">
               <button
-                onClick={() => {
+                onClick={async () => {
                   setSelectedProjectId('ALL')
                   setShowProjectDrawer(false)
+                  if (onLoadConversation) {
+                    await onLoadConversation('ALL', historyDays)
+                  }
                 }}
                 className={`w-full p-2.5 rounded-xl border text-left flex items-center justify-between transition-all ${
                   selectedProjectId === 'ALL'
@@ -1097,6 +1174,18 @@ export function ChatStream({
             // Agent Turn
             const isLatestTurn = turnIdx === chatTurns.length - 1
             const hasPipeline = turn.executionItems.length > 0
+
+            // In Clean Chat mode, skip empty intermediate tool turns unless currently running
+            if (viewMode === 'responses' && turn.finalResponses.length === 0) {
+              if (!turn.isRunning) return null
+              return (
+                <div key={turn.id} className="flex items-center gap-2 px-3 py-2 rounded-xl bg-[#080d0a] border border-amber-500/40 text-amber-300 text-xs font-mono animate-pulse">
+                  <Brain className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Agent executing ({turn.totalToolCalls} tools)...</span>
+                </div>
+              )
+            }
+
             // Auto-expand pipeline if the turn has no final response yet, or if user explicitly toggled it
             const isPipelineOpen =
               expandedTurns[turn.id] !== undefined
@@ -1308,6 +1397,11 @@ export function ChatStream({
                   {/* 2. Prominent Final Agent Response Card(s) */}
                   {turn.finalResponses.map((resp, rIdx) => {
                     const respKey = `${turn.id}-resp-${rIdx}`
+                    const isLastResponseInTurn = rIdx === turn.finalResponses.length - 1
+                    const { cleanContent, options: decisionOptions } = extractDecisionOptions(
+                      resp.content
+                    )
+
                     return (
                       <div
                         key={respKey}
@@ -1340,7 +1434,7 @@ export function ChatStream({
                             )}
                             <button
                               type="button"
-                              onClick={() => copyText(resp.content, respKey)}
+                              onClick={() => copyText(cleanContent, respKey)}
                               className="px-2 py-0.5 rounded-lg bg-emerald-950/70 hover:bg-amber-950 text-emerald-300 hover:text-amber-300 border border-emerald-800/60 text-[9px] font-mono flex items-center gap-1 transition-all"
                               title="Copy response markdown"
                             >
@@ -1365,7 +1459,53 @@ export function ChatStream({
                           </div>
                         </div>
 
-                        <MarkdownContent content={resp.content} />
+                        <MarkdownContent content={cleanContent} />
+
+                        {/* Interactive Decision Chips (when agent asks a question with [OPTIONS: ...]) */}
+                        {decisionOptions.length > 0 && (
+                          <div className="pt-2 border-t border-amber-500/30 space-y-1.5">
+                            <span className="text-[9.5px] font-mono uppercase tracking-wider text-amber-400 font-bold block">
+                              Tap Decision to Reply Instantly:
+                            </span>
+                            <div className="flex flex-wrap gap-1.5">
+                              {decisionOptions.map((opt, oIdx) => (
+                                <button
+                                  key={oIdx}
+                                  type="button"
+                                  onClick={() => sendContextualPrompt(opt)}
+                                  className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-400 hover:from-amber-400 hover:to-yellow-300 text-black text-xs font-bold shadow-[0_0_12px_rgba(234,179,8,0.3)] transition-all active:scale-95"
+                                >
+                                  {opt}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Contextual 1-Tap Response Feedback Bar on the Latest Agent Turn */}
+                        {isLatestTurn && isLastResponseInTurn && decisionOptions.length === 0 && (
+                          <div className="pt-2 border-t border-emerald-950/90 flex items-center justify-between gap-2 flex-wrap">
+                            <span className="text-[9px] font-mono text-emerald-500/80">
+                              Quick Feedback:
+                            </span>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              {[
+                                { label: '👍 Approve & Continue', prompt: 'Approved. Proceed with the next step.' },
+                                { label: '🧪 Run Tests', prompt: 'Run the test suite and verify everything passes.' },
+                                { label: '🔍 Explain Changes', prompt: 'Briefly explain the key changes made.' },
+                              ].map((fb) => (
+                                <button
+                                  key={fb.label}
+                                  type="button"
+                                  onClick={() => sendContextualPrompt(fb.prompt)}
+                                  className="px-2 py-1 rounded-lg bg-[#060907] hover:bg-amber-950/70 border border-emerald-900/80 hover:border-amber-400 text-[10px] font-mono text-amber-200 transition-all active:scale-95"
+                                >
+                                  {fb.label}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
                       </div>
                     )
                   })}
@@ -1380,6 +1520,9 @@ export function ChatStream({
             const hasThinking = !!step.thinking
             const hasTools = step.tool_calls && step.tool_calls.length > 0
             const isError = step.status === 'ERROR'
+            const { cleanContent, options: stepOptions } = step.content
+              ? extractDecisionOptions(step.content)
+              : { cleanContent: '', options: [] }
 
             return (
               <div
@@ -1449,9 +1592,24 @@ export function ChatStream({
                     </div>
                   )}
 
-                  {step.content && (
+                  {cleanContent && (
                     <div className={isUser ? 'text-xs font-semibold whitespace-pre-wrap' : ''}>
-                      {isUser ? sanitizeUserText(step.content) : <MarkdownContent content={step.content} />}
+                      {isUser ? sanitizeUserText(cleanContent) : <MarkdownContent content={cleanContent} />}
+                    </div>
+                  )}
+
+                  {!isUser && stepOptions.length > 0 && (
+                    <div className="pt-2 border-t border-amber-500/30 flex flex-wrap gap-1.5">
+                      {stepOptions.map((opt, oIdx) => (
+                        <button
+                          key={oIdx}
+                          type="button"
+                          onClick={() => sendContextualPrompt(opt)}
+                          className="px-3 py-1 rounded-xl bg-amber-500 text-black text-xs font-bold"
+                        >
+                          {opt}
+                        </button>
+                      ))}
                     </div>
                   )}
                 </div>
@@ -1470,7 +1628,7 @@ export function ChatStream({
             <button
               key={reply}
               type="button"
-              onClick={() => onSendPrompt(reply)}
+              onClick={() => sendContextualPrompt(reply)}
               className="text-[11px] font-medium px-2.5 py-1 rounded-full bg-[#0d140f] hover:bg-emerald-950/80 text-amber-200/90 border border-emerald-900/70 hover:border-amber-500/50 whitespace-nowrap transition-colors shrink-0"
             >
               {reply}
@@ -1483,7 +1641,11 @@ export function ChatStream({
             type="text"
             value={promptInput}
             onChange={(e) => setPromptInput(e.target.value)}
-            placeholder="Send prompt or instruction to Antigravity IDE..."
+            placeholder={
+              activeProjectInfo
+                ? `Prompt ${activeProjectInfo.project_name} (${activeProjectInfo.ide})...`
+                : 'Send prompt or instruction to Antigravity IDE...'
+            }
             className="flex-1 bg-[#0d140f] border border-emerald-900/80 rounded-xl px-3.5 py-2.5 text-xs text-white placeholder-emerald-600/60 focus:outline-none focus:border-amber-400"
           />
           <button

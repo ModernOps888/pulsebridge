@@ -1,9 +1,10 @@
+import os
 import requests
 import json
 import sys
 import time
 
-BASE_URL = "http://127.0.0.1:8080"
+BASE_URL = os.environ.get("PULSEBRIDGE_URL", "http://127.0.0.1:8080")
 PIN = sys.argv[1] if len(sys.argv) > 1 else "628302"
 
 print("==================================================================")

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import {
   Send,
   Mic,
@@ -15,11 +15,12 @@ import {
   BellRing,
   TerminalSquare,
 } from 'lucide-react'
-import type { IdeSource } from '../types'
+import type { IdeSource, ProjectChatInfo } from '../types'
 
 interface RemoteControlDrawerProps {
   token: string | null
   activeIde?: IdeSource
+  projects?: ProjectChatInfo[]
   onAlert: (msg: string) => void
   notificationPermission?: NotificationPermission
   onRequestNotificationPermission?: () => Promise<boolean>
@@ -30,6 +31,7 @@ interface RemoteControlDrawerProps {
 export function RemoteControlDrawer({
   token,
   activeIde = 'antigravity',
+  projects = [],
   onAlert,
   notificationPermission = 'default',
   onRequestNotificationPermission,
@@ -41,7 +43,7 @@ export function RemoteControlDrawer({
   const [actionMode, setActionMode] = useState<
     'inject_window' | 'direct_inbox' | 'launch_project' | 'execute_command'
   >('inject_window')
-  const [projectPath, setProjectPath] = useState('C:\\')
+  const [projectPath, setProjectPath] = useState('C:\\PulseBridge')
   const [isRecording, setIsRecording] = useState(false)
   const [loading, setLoading] = useState(false)
   const [lastResult, setLastResult] = useState<{ success: boolean; message: string } | null>(null)
@@ -53,6 +55,12 @@ export function RemoteControlDrawer({
 
   // DevOps Terminal Output State
   const [terminalOutput, setTerminalOutput] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (activeIde) {
+      setTargetIde(activeIde)
+    }
+  }, [activeIde])
 
   const toggleSpeechRecognition = () => {
     const SpeechRecognition =
@@ -97,11 +105,20 @@ export function RemoteControlDrawer({
     }
   }
 
+  const canSubmit =
+    actionMode === 'launch_project'
+      ? Boolean(projectPath.trim() || prompt.trim())
+      : Boolean(prompt.trim())
+
   const handleDispatch = async () => {
-    if (!prompt.trim() || loading) return
+    if (!canSubmit || loading) return
     setLoading(true)
     setLastResult(null)
     setTerminalOutput(null)
+
+    const effectiveMessage =
+      prompt.trim() ||
+      (actionMode === 'launch_project' ? `Open project ${projectPath.trim()}` : '')
 
     try {
       const res = await fetch('/api/action/remote_prompt', {
@@ -111,22 +128,22 @@ export function RemoteControlDrawer({
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          message: prompt.trim(),
+          message: effectiveMessage,
           target_ide: targetIde,
           action_mode: actionMode,
-          project_path: projectPath,
+          project_path: projectPath.trim() || undefined,
           command: actionMode === 'execute_command' ? prompt.trim() : undefined,
         }),
       })
 
       const data = await res.json()
+      if (data.stdout) {
+        setTerminalOutput(data.stdout)
+      }
       if (res.ok && data.success) {
         setLastResult({ success: true, message: data.message })
-        if (data.stdout) {
-          setTerminalOutput(data.stdout)
-        }
         setPrompt('')
-        onAlert('Prompt dispatched to your PC!')
+        onAlert(data.message || 'Dispatched to your PC!')
       } else {
         setLastResult({
           success: false,
@@ -161,14 +178,20 @@ export function RemoteControlDrawer({
           message: cmd,
           target_ide: targetIde,
           action_mode: 'execute_command',
+          project_path: projectPath.trim() || undefined,
           command: cmd,
         }),
       })
 
       const data = await res.json()
+      if (data.stdout) {
+        setTerminalOutput(data.stdout)
+      }
       if (res.ok && data.success) {
-        setLastResult({ success: true, message: `Executed: ${cmd}` })
-        setTerminalOutput(data.stdout || data.message || 'Command executed.')
+        setLastResult({ success: true, message: data.message || `Executed: ${cmd}` })
+        if (!data.stdout) {
+          setTerminalOutput(data.message || 'Command executed.')
+        }
         onAlert(`Executed: ${cmd}`)
       } else {
         setLastResult({
@@ -336,21 +359,26 @@ export function RemoteControlDrawer({
 
       {/* DevOps Quick Runbook Toolbar */}
       <div className="rounded-2xl bg-[#0a0f0c] border border-emerald-900/60 p-4 space-y-2.5 shadow-md">
-        <span className="text-[11px] font-bold text-emerald-300 flex items-center gap-1.5">
-          <TerminalSquare className="w-3.5 h-3.5 text-amber-400" />
-          DevOps Quick Runbook (1-Tap PC Shell)
-        </span>
+        <div className="flex items-center justify-between">
+          <span className="text-[11px] font-bold text-emerald-300 flex items-center gap-1.5">
+            <TerminalSquare className="w-3.5 h-3.5 text-amber-400" />
+            DevOps Quick Runbook (1-Tap PC Shell)
+          </span>
+          <span className="text-[9.5px] font-mono text-amber-300/90 truncate max-w-[45%]">
+            cwd: {projectPath || 'C:\\PulseBridge'}
+          </span>
+        </div>
 
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
           {[
             { label: 'git status', cmd: 'git status' },
             { label: 'git diff --stat', cmd: 'git diff --stat' },
             { label: 'git log -1', cmd: 'git log -1' },
-            { label: 'npm test', cmd: 'npm test' },
+            { label: 'git branch -a', cmd: 'git branch -a' },
             { label: 'cargo check', cmd: 'cargo check' },
-            { label: 'git pull', cmd: 'git pull' },
-            { label: 'dir / ls', cmd: 'dir' },
-            { label: 'whoami / info', cmd: 'whoami; hostname' },
+            { label: 'cargo test', cmd: 'cargo test' },
+            { label: 'npm test', cmd: 'npm test' },
+            { label: 'npm run build', cmd: 'npm run build' },
           ].map((action, i) => (
             <button
               key={i}
@@ -394,19 +422,51 @@ export function RemoteControlDrawer({
             </select>
           </div>
 
-          {actionMode === 'launch_project' && (
-            <div className="space-y-1">
-              <label className="text-[10px] text-amber-400/90 font-medium">Project Folder Path</label>
-              <input
-                type="text"
-                value={projectPath}
-                onChange={(e) => setProjectPath(e.target.value)}
-                placeholder="e.g. C:\Infinity\frontend"
-                className="w-full bg-[#0d140f] border border-emerald-900/80 rounded-xl px-3 py-2 text-xs text-amber-100 focus:outline-none focus:border-amber-400 font-mono"
-              />
-            </div>
-          )}
+          <div className="space-y-1">
+            <label className="text-[10px] text-amber-400/90 font-medium">
+              Project Working Directory (`cwd`)
+            </label>
+            <input
+              type="text"
+              value={projectPath}
+              onChange={(e) => setProjectPath(e.target.value)}
+              placeholder="e.g. C:\PulseBridge or C:\Infinity\frontend"
+              className="w-full bg-[#0d140f] border border-emerald-900/80 rounded-xl px-3 py-2 text-xs text-amber-100 focus:outline-none focus:border-amber-400 font-mono"
+            />
+          </div>
         </div>
+
+        {/* Discovered Project Working Directory Pills */}
+        {projects.some((p) => p.project_path) && (
+          <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 scrollbar-none">
+            <span className="text-[9.5px] font-mono text-emerald-500 shrink-0">Projects:</span>
+            {Array.from(
+              new Map(
+                projects
+                  .filter((p) => p.project_path)
+                  .map((p) => [p.project_path!, p])
+              ).values()
+            )
+              .slice(0, 6)
+              .map((proj) => (
+                <button
+                  key={proj.id}
+                  type="button"
+                  onClick={() => {
+                    if (proj.project_path) setProjectPath(proj.project_path)
+                    setTargetIde(proj.ide)
+                  }}
+                  className={`px-2 py-0.5 rounded-lg text-[9.5px] font-mono border shrink-0 transition-all ${
+                    projectPath === proj.project_path
+                      ? 'bg-amber-950 border-amber-400 text-amber-300 font-bold'
+                      : 'bg-[#0d140f] border-emerald-950 text-emerald-400 hover:border-amber-500/40'
+                  }`}
+                >
+                  {proj.project_name}
+                </button>
+              ))}
+          </div>
+        )}
 
         {/* Quick Presets */}
         <div className="space-y-1.5 pt-1">
@@ -439,6 +499,8 @@ export function RemoteControlDrawer({
               placeholder={
                 actionMode === 'execute_command'
                   ? 'Enter shell command to run on PC (e.g. git status, npm test)...'
+                  : actionMode === 'launch_project'
+                  ? 'Optional note when opening project in IDE (or leave blank to open immediately)...'
                   : 'Describe what you want fixed or instructed on your PC...'
               }
               className="w-full bg-[#0d140f] border border-emerald-900/80 rounded-xl p-3 text-xs text-emerald-100 placeholder-emerald-600/50 focus:outline-none focus:border-amber-400 resize-none font-sans"
@@ -461,7 +523,7 @@ export function RemoteControlDrawer({
           {/* Dispatch Button in Gold & Emerald */}
           <button
             onClick={handleDispatch}
-            disabled={!prompt.trim() || loading}
+            disabled={!canSubmit || loading}
             className="w-full py-3 rounded-xl bg-gradient-to-r from-amber-500 via-yellow-500 to-emerald-500 hover:from-amber-400 hover:to-emerald-400 active:scale-[0.99] text-black font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-amber-950/40 disabled:opacity-40 transition-all tracking-wide"
           >
             {loading ? (
@@ -469,7 +531,13 @@ export function RemoteControlDrawer({
             ) : (
               <>
                 <Send className="w-3.5 h-3.5" />
-                <span>Send to PC & Execute</span>
+                <span>
+                  {actionMode === 'launch_project'
+                    ? 'Open / Focus Project in IDE'
+                    : actionMode === 'execute_command'
+                    ? 'Execute Shell Command on PC'
+                    : 'Send to PC & Execute'}
+                </span>
               </>
             )}
           </button>

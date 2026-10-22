@@ -101,6 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/project/structure", get(api::project_structure_handler))
         .route("/api/ide/windows", get(api::list_windows_handler))
         .route("/api/preview/frame", get(api::preview_frame_handler))
+        .route("/api/inbox", get(ingest::handle_get_inbox))
         .route("/api/ingest/event", post(ingest::handle_ingest_event))
         .route("/api/action/prompt", post(ingest::handle_send_prompt))
         .route("/api/action/remote_prompt", post(ingest::handle_remote_action))

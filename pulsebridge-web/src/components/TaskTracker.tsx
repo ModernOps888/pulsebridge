@@ -24,12 +24,18 @@ export function TaskTracker({ task }: TaskTrackerProps) {
     if (!task) return
     setElapsed(task.elapsed_seconds)
 
+    const isActive =
+      task.status === 'thinking' ||
+      task.status === 'runningtool' ||
+      task.status === 'waitinginput'
+    if (!isActive) return
+
     const timer = setInterval(() => {
       setElapsed((prev) => prev + 1)
     }, 1000)
 
     return () => clearInterval(timer)
-  }, [task?.task_id, task?.elapsed_seconds])
+  }, [task?.task_id, task?.elapsed_seconds, task?.status])
 
   const formatTimer = (totalSecs: number) => {
     const hrs = Math.floor(totalSecs / 3600)

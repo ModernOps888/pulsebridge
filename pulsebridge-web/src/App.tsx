@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { usePulseBridge } from './hooks/usePulseBridge'
 import { PinLockScreen } from './components/PinLockScreen'
 import { Header } from './components/Header'
@@ -20,6 +20,7 @@ export function App() {
     chatSteps,
     projects,
     refreshProjects,
+    refreshWindows,
     loadConversationHistory,
     fetchProjectStructure,
     telemetry,
@@ -44,6 +45,16 @@ export function App() {
 
   const [activeTab, setActiveTab] = useState<NavTab>('tracker')
   const [toastMessage, setToastMessage] = useState<string | null>(null)
+  const [lastSeenStepCount, setLastSeenStepCount] = useState<number>(0)
+
+  useEffect(() => {
+    if (activeTab === 'chat' || lastSeenStepCount === 0) {
+      setLastSeenStepCount(chatSteps.length)
+    }
+  }, [activeTab, chatSteps.length, lastSeenStepCount])
+
+  const unreadStepsCount =
+    activeTab === 'chat' ? 0 : Math.max(0, chatSteps.length - lastSeenStepCount)
 
   const showToast = (msg: string) => {
     setToastMessage(msg)
@@ -118,6 +129,7 @@ export function App() {
           <RemoteControlDrawer
             token={token}
             activeIde={task?.active_ide}
+            projects={projects}
             onAlert={showToast}
             notificationPermission={notificationPermission}
             onRequestNotificationPermission={requestNotificationPermission}
@@ -130,6 +142,7 @@ export function App() {
             windows={windows}
             token={token}
             onRequestSnapshot={requestSnapshot}
+            onRefreshWindows={refreshWindows}
             latestFrame={latestFrame}
             onScroll={sendScroll}
             onHotkey={sendHotkey}
@@ -143,7 +156,7 @@ export function App() {
       <BottomNav
         activeTab={activeTab}
         onTabChange={setActiveTab}
-        unreadStepsCount={0}
+        unreadStepsCount={unreadStepsCount}
       />
     </div>
   )

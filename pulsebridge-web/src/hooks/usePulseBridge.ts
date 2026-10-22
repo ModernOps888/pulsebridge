@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import type { ChatStep, IdeWindowInfo, ProjectChatInfo, ProjectStructureResponse, ServerAlert, SystemTelemetry, TaskProgress } from '../types'
+import type { ChatStep, IdeWindowInfo, ProjectChatInfo, ProjectStructureResponse, PromptContextOptions, ServerAlert, SystemTelemetry, TaskProgress } from '../types'
 
 export function usePulseBridge() {
   const [token, setToken] = useState<string | null>(() => {
@@ -281,7 +281,8 @@ export function usePulseBridge() {
   }
 
   // Send message back to IDE from phone
-  const sendPrompt = (message: string) => {
+  const sendPrompt = (message: string, options?: PromptContextOptions) => {
+    const resolvedIde = options?.targetIde || task?.active_ide || 'antigravity'
     const userStep: ChatStep = {
       id: `local-${Date.now()}`,
       step_index: chatSteps.length + 1,
@@ -290,7 +291,9 @@ export function usePulseBridge() {
       step_type: 'USER_INPUT',
       status: 'DONE',
       content: message,
-      ide: task?.active_ide || 'antigravity',
+      ide: resolvedIde,
+      project_name: options?.projectName,
+      conversation_id: options?.conversationId,
     }
     setChatSteps((prev) => [...prev, userStep])
 
@@ -302,7 +305,13 @@ export function usePulseBridge() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ message }),
+        body: JSON.stringify({
+          message,
+          target_ide: resolvedIde,
+          target_project: options?.projectPath,
+          project_name: options?.projectName,
+          conversation_id: options?.conversationId,
+        }),
       })
       triggerHaptic(40)
       return
@@ -311,16 +320,27 @@ export function usePulseBridge() {
     wsRef.current.send(
       JSON.stringify({
         type: 'send_prompt',
-        payload: { message },
+        payload: {
+          message,
+          target_ide: resolvedIde,
+          project_name: options?.projectName,
+          conversation_id: options?.conversationId,
+          project_path: options?.projectPath,
+        },
       })
     )
     triggerHaptic(40)
   }
 
   // Remote mouse scroll helper
-  const sendScroll = async (delta: number, xRatio?: number, yRatio?: number, windowId?: number) => {
+  const sendScroll = async (
+    delta: number,
+    xRatio?: number,
+    yRatio?: number,
+    windowId?: number
+  ): Promise<boolean> => {
     try {
-      await fetch('/api/action/scroll', {
+      const res = await fetch('/api/action/scroll', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -334,15 +354,17 @@ export function usePulseBridge() {
         }),
       })
       triggerHaptic(20)
+      return res.ok
     } catch (err) {
       console.error('Failed to trigger remote scroll', err)
+      return false
     }
   }
 
   // Remote hotkey helper
-  const sendHotkey = async (key: string, windowId?: number | null) => {
+  const sendHotkey = async (key: string, windowId?: number | null): Promise<boolean> => {
     try {
-      await fetch('/api/action/hotkey', {
+      const res = await fetch('/api/action/hotkey', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -351,8 +373,10 @@ export function usePulseBridge() {
         body: JSON.stringify({ key, window_id: windowId ?? undefined }),
       })
       triggerHaptic(25)
+      return res.ok
     } catch (err) {
       console.error('Failed to send remote hotkey', err)
+      return false
     }
   }
 
@@ -392,9 +416,26 @@ export function usePulseBridge() {
   }
 
   const emergencyStop = () => {
+    triggerHaptic([200, 100, 200])
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'emergency_stop', payload: {} }))
-      triggerHaptic([200, 100, 200])
+      wsRef.current.send(JSON.stringify({ type: 'emergency_stop' }))
+    } else if (token) {
+      fetch('/api/action/hotkey', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ key: 'esc' }),
+      }).catch(() => {})
+      fetch('/api/action/hotkey', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ key: 'ctrl_c' }),
+      }).catch(() => {})
     }
   }
 
@@ -517,6 +558,44 @@ export function usePulseBridge() {
     }
   }, [isAuthenticated])
 
+  // Auto-reconnect on mobile wake / visibilitychange / network change (Wi-Fi <-> 4G)
+  useEffect(() => {
+    const handleWakeOrOnline = () => {
+      if (document.visibilityState === 'hidden') return
+      const storedToken = token || localStorage.getItem('pulsebridge_token')
+      if (!storedToken) return
+      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+        connectWebSocket(storedToken)
+      } else {
+        try {
+          wsRef.current.send(JSON.stringify({ type: 'ping' }))
+        } catch (_) {
+          connectWebSocket(storedToken)
+        }
+      }
+    }
+    document.addEventListener('visibilitychange', handleWakeOrOnline)
+    window.addEventListener('online', handleWakeOrOnline)
+    return () => {
+      document.removeEventListener('visibilitychange', handleWakeOrOnline)
+      window.removeEventListener('online', handleWakeOrOnline)
+    }
+  }, [token, connectWebSocket])
+
+  const refreshWindows = useCallback(async () => {
+    const authToken = token || localStorage.getItem('pulsebridge_token')
+    if (!authToken) return
+    try {
+      const res = await fetch(`/api/ide/windows?token=${encodeURIComponent(authToken)}`)
+      if (res.ok) {
+        const data = await res.json()
+        if (Array.isArray(data)) {
+          setWindows(data)
+        }
+      }
+    } catch (_) {}
+  }, [token])
+
   const refreshProjects = useCallback(async (days = 30) => {
     if (!token && !localStorage.getItem('pulsebridge_token')) return
     const authToken = token || localStorage.getItem('pulsebridge_token')
@@ -531,15 +610,33 @@ export function usePulseBridge() {
     } catch (_) {}
   }, [token])
 
-  // On-demand loader for historical conversation steps
+  // On-demand loader for historical conversation steps (or 'ALL' to reload all steps)
   const loadConversationHistory = useCallback(async (convId: string, days = 30): Promise<ChatStep[]> => {
     const authToken = token || localStorage.getItem('pulsebridge_token')
     try {
-      const res = await fetch(`/api/chat?conversation_id=${encodeURIComponent(convId)}&days=${days}&token=${encodeURIComponent(authToken || '')}`)
+      const isAll = !convId || convId === 'ALL'
+      const url = isAll
+        ? `/api/chat?days=${days}&token=${encodeURIComponent(authToken || '')}`
+        : `/api/chat?conversation_id=${encodeURIComponent(convId)}&days=${days}&token=${encodeURIComponent(authToken || '')}`
+      const res = await fetch(url)
       if (res.ok) {
         const steps = await res.json()
-        if (Array.isArray(steps) && steps.length > 0) {
-          setChatSteps(steps)
+        if (Array.isArray(steps)) {
+          if (isAll) {
+            setChatSteps(steps)
+          } else {
+            // Merge loaded conversation steps into chatSteps without wiping other conversations
+            setChatSteps((prev) => {
+              const map = new Map<string, ChatStep>()
+              for (const s of prev) {
+                map.set(s.id, s)
+              }
+              for (const s of steps) {
+                map.set(s.id, s)
+              }
+              return Array.from(map.values())
+            })
+          }
           return steps
         }
       }
@@ -576,6 +673,7 @@ export function usePulseBridge() {
     fetchProjectStructure,
     telemetry,
     windows,
+    refreshWindows,
     latestFrame,
     alerts,
     latencyMs,
